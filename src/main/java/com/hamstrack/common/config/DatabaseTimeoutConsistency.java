@@ -668,7 +668,8 @@ public class DatabaseTimeoutConsistency {
     private void warnIfTheBoundOutlastsTheGrace(int statementMs) {
         long graceMs = mail.async().stopGraceMs();
         if (statementMs > graceMs) {
-            log.warn("app.persistence.statement-timeout-ms ({} ms) is longer than the stop grace "
+            log.warn("app.persistence.statement-timeout-ms (DB_STATEMENT_TIMEOUT_MS, {} ms) is "
+                     + "longer than the stop grace "
                      + "this deployment gives the process (app.mail.async.stop-grace-seconds, {} "
                      + "ms), so a statement running at that bound cannot finish inside a shutdown: "
                      + "a deploy kills it, and it holds one of DB_POOL_MAX_SIZE connections until "

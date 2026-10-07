@@ -77,6 +77,7 @@ class DoorsHarnessTest {
         floored.put("servletFilters", Doors.servletFilters().floor(4));
         floored.put("mailSendSites", Doors.mailSendSites().floor(3));
         floored.put("problemJsonWriters", Doors.problemJsonWriters().floor(25));
+        floored.put("configurationProperties", Doors.configurationProperties().floor(80));
 
         // Narrowings and second calls the consumers rely on: floored and printed, but not
         // populations of their own, so they are outside the equality below.

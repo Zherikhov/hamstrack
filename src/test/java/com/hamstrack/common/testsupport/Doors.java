@@ -1,8 +1,10 @@
 package com.hamstrack.common.testsupport;
 
 import com.hamstrack.HamstrackApplication;
+import com.hamstrack.common.config.Credential;
 import jakarta.persistence.Table;
 import jakarta.servlet.Filter;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.core.MethodIntrospector;
 import org.springframework.core.MethodParameter;
@@ -41,6 +43,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Parameter;
+import java.lang.reflect.RecordComponent;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -283,6 +286,50 @@ public final class Doors {
     }
 
     /**
+     * One bindable component of a {@code @ConfigurationProperties} root — the unit a rule about
+     * configuration is about: an owner and a component, never a class (HD-326). Two credentials
+     * live on one type ({@code StorageProperties.S3}), so a population keyed on the class would let
+     * one member's clean bill of health answer for the other's.
+     *
+     * @param root       the root prefix the annotation declares, e.g. {@code app.storage}
+     * @param owner      the record declaring the component — a nested one for {@code S3}
+     * @param component  the record component itself; a consumer reading an annotation off it must
+     *                   also read the backing field, the accessor and the canonical-constructor
+     *                   parameter, because an annotation lands only where its {@code @Target}
+     *                   allows and {@code jakarta.validation} declares no {@code RECORD_COMPONENT}
+     * @param property   the property name an operator sets, e.g. {@code app.storage.s3.access-key}
+     * @param credential whether the component carries {@link Credential} — the marker is the
+     *                   population, never the name (see that annotation's javadoc)
+     */
+    public record ConfigProperty(String root, Class<?> owner, RecordComponent component, String property,
+                                 boolean credential) {
+
+        /** {@code StorageProperties.S3#accessKey} — the owner chain, so two roots cannot share an id. */
+        public String id() {
+            var name = new StringBuilder(owner.getSimpleName());
+            for (Class<?> enclosing = owner.getEnclosingClass(); enclosing != null;
+                    enclosing = enclosing.getEnclosingClass()) {
+                name.insert(0, enclosing.getSimpleName() + ".");
+            }
+            return name + "#" + component.getName();
+        }
+
+        /** The variable an operator sets, by Spring's relaxed binding ({@link RelaxedNames}). */
+        public String variable() {
+            return RelaxedNames.variableFor(property);
+        }
+
+        public String describe() {
+            return property + " (" + variable() + ") " + id() + (credential ? " [credential]" : "");
+        }
+
+        @Override
+        public String toString() {
+            return describe();
+        }
+    }
+
+    /**
      * A place that can write a response body outside a handler's own return value.
      *
      * @param method the {@code @ExceptionHandler} method for {@link WriterKind#ADVICE_HANDLER}; {@code null} for a door
@@ -513,6 +560,37 @@ public final class Doors {
      */
     public static Population<ProblemWriter> problemJsonWriters() {
         return PROBLEM_JSON_WRITERS.get();
+    }
+
+    /**
+     * Every bindable component of every production {@code @ConfigurationProperties} root (P10),
+     * nested records walked, each mapped to the property name and the environment variable an
+     * operator sets for it. Both spellings of the annotation are read ({@code value} and
+     * {@code prefix} — this codebase writes it both ways and each leaves the other accessor empty),
+     * and the roots come from the real annotation on the loaded class, never from source text,
+     * because {@code {@code @ConfigurationProperties(prefix = "app")}} inside a javadoc is text a
+     * regex cannot tell from a declaration.
+     *
+     * <p>Consumers: the property-to-variable mapping in
+     * {@code StartupRefusalNamesTheVariableTest} (which separately holds this population's ROOTS
+     * equal to a second derivation from {@code src/main/java}, so a truncated compile disagrees with
+     * the sources instead of quietly shrinking the mapping), and
+     * {@code CredentialPropertiesCarryNoConstraintTest}, whose population is the
+     * {@link ConfigProperty#credential()} members.
+     *
+     * <p><strong>Not included:</strong> a properties holder that is not a record — the walk is over
+     * record components, and a setter-bound class would contribute its root and no properties
+     * (none exists today: 23 of 23 roots are records, and a non-record root makes the root/source
+     * parity in {@code StartupRefusalNamesTheVariableTest} disagree about nothing, so that arrival
+     * is silent here and must widen this walk); a root registered by
+     * {@code @EnableConfigurationProperties} on a class Spring owns ({@code MultipartProperties},
+     * reached from {@code StorageQuotaConsistency}) — the walk is over {@code com.hamstrack}
+     * classes; a property bound by {@code @Value} (that is the second derivation in
+     * {@code StartupRefusalNamesTheVariableTest}); whether a property is <em>set</em> anywhere, by
+     * whom, or to what. Values are never read: this is a population of names.
+     */
+    public static Population<ConfigProperty> configurationProperties() {
+        return CONFIGURATION_PROPERTIES.get();
     }
 
     // =================================================================== the root
@@ -769,6 +847,50 @@ public final class Doors {
                 .thenComparing(w -> w.method() == null ? "" : w.method().getName()));
         return Population.of("problem writers", writers);
     });
+
+    private static final Memo<Population<ConfigProperty>> CONFIGURATION_PROPERTIES = new Memo<>(() -> {
+        var properties = new ArrayList<ConfigProperty>();
+        for (var type : productionClasses()) {
+            var annotation = type.getAnnotation(ConfigurationProperties.class);
+            if (annotation == null) {
+                continue;
+            }
+            var root = annotation.prefix().isEmpty() ? annotation.value() : annotation.prefix();
+            if (root.isEmpty()) {
+                // Refused rather than skipped: a prefixless root binds at the top of the
+                // environment, and skipping it would drop every property under it from every
+                // consumer while this population still looked healthy.
+                throw new AssertionError(type.getName() + " carries @ConfigurationProperties with no prefix and no "
+                                         + "value. Doors keys configuration on the root prefix, so such a root has no "
+                                         + "property names to enumerate; give it a prefix, or teach this walk how to "
+                                         + "enumerate one that binds at the environment root.");
+            }
+            collectConfigProperties(root, type, root, properties, 0);
+        }
+        properties.sort(Comparator.comparing(ConfigProperty::property).thenComparing(ConfigProperty::id));
+        return Population.of("configuration properties", properties);
+    });
+
+    /**
+     * {@code prefix} plus each record component, recursively through nested records. Depth-bounded
+     * for the reason every walk here is: a cycle in a properties tree is impossible today, and a
+     * {@code StackOverflowError} out of a test tells its reader nothing.
+     */
+    private static void collectConfigProperties(String root, Class<?> type, String prefix,
+                                                List<ConfigProperty> into, int depth) {
+        var components = type.getRecordComponents();
+        if (depth > 4 || components == null) {
+            return;
+        }
+        for (var component : components) {
+            var property = prefix + "." + RelaxedNames.kebabCase(component.getName());
+            into.add(new ConfigProperty(root, type, component, property,
+                    component.isAnnotationPresent(Credential.class)));
+            if (component.getType().isRecord()) {
+                collectConfigProperties(root, component.getType(), property, into, depth + 1);
+            }
+        }
+    }
 
     // =================================================================== predicates & helpers
 

@@ -148,9 +148,51 @@ public final class SourceCallSites {
         return out;
     }
 
-    /** A javadoc or line-comment line is not code. Anything else is. */
+    /**
+     * A javadoc or line-comment line is not code. Anything else is.
+     *
+     * <p>A question about the WHOLE line, which is what this class's two seals want. The
+     * positional question — "is the occurrence I just found commented out?" — is
+     * {@link #isCommentedAt(String, int)}, and the two are deliberately not one method: a line that
+     * begins in code can still carry a commented-out occurrence, and a predicate that answered the
+     * line-level question for a positional caller is exactly the defect that one fixes.
+     */
     static boolean isCode(String trimmedLine) {
         return !trimmedLine.startsWith("*") && !trimmedLine.startsWith("//");
+    }
+
+    /**
+     * <strong>Is the occurrence at {@code at} inside a comment?</strong> — judged on this line
+     * alone, by what precedes the occurrence rather than by what the line starts with (HD-326).
+     *
+     * <p>The predicate it replaces asked whether the LINE started with {@code *}, {@code //} or
+     * {@code /*}, which is a different question with the same answer most of the time. Measured
+     * consequences of the difference, both in a security-relevant walk: a {@code @Value} quoted in
+     * prose entered the live binding mapping from a javadoc line (harmless only by luck — that one
+     * happened to name the right variable; one naming a DIFFERENT property would have excused a
+     * refusal that names no variable at all), and {@code foo(); /}{@code * @Value("${x}") *}{@code /}
+     * still read as a binding because the line starts with code.
+     *
+     * <p>Three forms are recognised: a javadoc continuation ({@code *} before the occurrence, with
+     * only whitespace in front of it), a line comment ({@code //} anywhere before it), and a block
+     * comment opened before it and <em>not closed</em> before it — so
+     * {@code /}{@code * note *}{@code / live(}&hellip; is code, which the old predicate got wrong in
+     * the other direction. <strong>Not recognised:</strong> a block comment opened on an earlier
+     * line (this class reads one line at a time on purpose — the input a pattern sees stays short),
+     * and a {@code //} inside a string literal before the occurrence. Both over-report a comment,
+     * which drops a member from a walk rather than inventing one; a caller for which that is the
+     * unsafe direction needs a parser, not this.
+     */
+    public static boolean isCommentedAt(String line, int at) {
+        var before = line.substring(0, Math.min(at, line.length()));
+        if (before.strip().startsWith("*")) {
+            return true;
+        }
+        if (before.contains("//")) {
+            return true;
+        }
+        var opened = before.lastIndexOf("/*");
+        return opened >= 0 && before.indexOf("*/", opened + 2) < 0;
     }
 
     private record CompilationUnit(String type, List<String> lines) {

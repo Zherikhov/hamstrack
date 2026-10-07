@@ -376,6 +376,13 @@ container that exits during startup, with the reason in `docker compose logs app
 skips seeding — so the symptom is that **nobody can log in**. That is deliberately the louder
 half of the alternative, which used to be that anyone could.
 
+The WARN is the only notice you get, and it arrives *after* the port is open: the container
+is healthy, `docker compose up --wait` reports success, and the sign-in above answers `401`.
+It names both variables and what to do, so look for it in `docker compose logs app` whenever
+a fresh install will not let you in — including when you are sure the password is set, because
+a **misspelled** variable name (`SEED_ADMIN_PASSWORD_0`) is delivered to the container
+unchanged, binds to nothing, and is indistinguishable from leaving the line empty.
+
 #### If your instance has the published admin account
 
 Seeding is idempotent, so an upgrade finds the existing user and *skips*: removing
@@ -1103,7 +1110,7 @@ sitting in `.env` in plaintext.
 
 *Measured 2026-09-30 against an install with one active administrator whose
 `password_hash` had been cleared: the restart logged `Admin account created from
-seed.admin.email`, sign-in as the new address answered `200` while the old address still
+seed.admin.email (SEED_ADMIN_EMAIL)`, sign-in as the new address answered `200` while the old address still
 answered `401`, and the admin console minted a `/reset-password?token=…` link for that
 old account with no `MAIL_*` variable set anywhere.*
 

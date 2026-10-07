@@ -1,5 +1,6 @@
 package com.hamstrack.ops;
 
+import com.hamstrack.common.testsupport.SeedAdminDefaults;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -10,7 +11,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -622,22 +622,24 @@ class EnvTemplateGuardTest {
      * only door in. A template rule refuses the published value without changing what any
      * stack demands.
      *
-     * <p><strong>The members are derived from {@code DataSeeder}, and the exclusion is a
-     * property rather than a name.</strong> They are the {@code seed.admin.*} {@code @Value}
-     * keys whose default is EMPTY — the ones the seeder treats as "not configured" and
-     * returns on. {@code seed.admin.display-name} defaults to {@code Admin} and is therefore
-     * not a member, which is the right answer for the right reason: a display name is not an
-     * identity, and {@code #SEED_ADMIN_DISPLAY_NAME=Admin} in a template is fine. If someone
-     * gives it an empty default one day, it joins on that day.
+     * <p><strong>The members are derived from the seeder's configuration type, and the exclusion
+     * is a property rather than a name.</strong> They are the {@code seed.admin.*} properties whose
+     * declared default is EMPTY — the ones the seeder treats as "not configured" and returns on.
+     * {@code seed.admin.display-name} defaults to {@code Admin} and is therefore not a member,
+     * which is the right answer for the right reason: a display name is not an identity, and
+     * {@code #SEED_ADMIN_DISPLAY_NAME=Admin} in a template is fine. If someone gives it an empty
+     * default one day, it joins on that day.
      *
      * <p><strong>The floor below is a COUNT, and it is only tight because the category has
-     * exactly two members.</strong> At two, losing one to a reformat — a line-wrapped
-     * {@code @Value}, a space in {@code ${seed.admin.email: }} — takes it to one and reds. At
-     * three it would take it to two and pass, silently, with a member outside the rule. If a
-     * third member ever appears, replace the floor: count every {@code seed.admin.} key the
-     * file mentions and assert that the empty-default partition plus the defaulted one
-     * accounts for all of them, so the check is about the partition rather than about a
-     * number.
+     * exactly two members.</strong> At two, losing one to a reformat takes it to one and reds. At
+     * three it would take it to two and pass, silently, with a member outside the rule. That
+     * fragility is smaller than it was: the population is now read reflectively off
+     * {@code SeedAdminProperties} rather than regexed out of a source file, so a line wrap or a
+     * stray space cannot shrink it at all — only deleting a component can, and
+     * {@code SeedAdminPropertiesTest} reds on that from the other side. If a third member ever
+     * appears, replace the floor: assert that the empty-default partition plus the defaulted one
+     * accounts for every component the record declares, so the check is about the partition rather
+     * than about a number.
      */
     @Test
     void noTemplateShipsAValueThatWouldCreateAnAccount() throws IOException {
@@ -659,10 +661,12 @@ class EnvTemplateGuardTest {
         }
 
         assertThat(members)
-                .withFailMessage("No account-creating variable was derived from DataSeeder, so this rule "
-                        + "is checking nothing. The members are the seed.admin.* @Value keys with an "
-                        + "EMPTY default - if that shape changed, teach accountCreatingVariables() the "
-                        + "new one rather than listing names here.")
+                .withFailMessage("No account-creating variable was derived from SeedAdminProperties, so "
+                        + "this rule is checking nothing. The members are the seed.admin.* properties "
+                        + "whose declared default is EMPTY - if that shape changed, teach "
+                        + "SeedAdminDefaults the new one rather than listing names here. Note that "
+                        + "@DefaultValue is @Target({PARAMETER}): a reader keyed on the record "
+                        + "component sees null for every component and produces exactly this failure.")
                 .hasSizeGreaterThanOrEqualTo(2);
         assertThat(offences)
                 .withFailMessage("""
@@ -685,16 +689,35 @@ class EnvTemplateGuardTest {
                 .isEmpty();
     }
 
-    /** {@code SEED_ADMIN_EMAIL} → why it matters, derived from {@code DataSeeder}'s own defaults. */
-    private static Map<String, String> accountCreatingVariables() throws IOException {
+    /**
+     * {@code SEED_ADMIN_EMAIL} → why it matters, derived from the seeder's own declared defaults.
+     *
+     * <p><strong>Read off the class, not out of the source</strong> (HD-326). These three values
+     * were three {@code @Value} fields on {@code DataSeeder} and this method was a regex over that
+     * file looking for {@code @Value("${seed.admin.x:}")}; they are now
+     * {@code SeedAdminProperties}, a bound {@code @ConfigurationProperties} record, and the empty
+     * default is a {@code @DefaultValue("")} on a constructor parameter. The derivation moved with
+     * them rather than being replaced by a list of two names — which is what the floor below is
+     * guarding against, and it did its job: against the new shape the old regex matched nothing and
+     * this test red with "No account-creating variable was derived from DataSeeder" before the
+     * reader was repointed.
+     *
+     * <p>The exclusion is still a property and still not a name: {@code displayName} defaults to
+     * {@code Admin}, so it is not a member, and {@code #SEED_ADMIN_DISPLAY_NAME=Admin} in a
+     * template stays fine. The day somebody gives it an empty default is the day it joins, with no
+     * edit here. Reading {@code @DefaultValue} is delegated to {@link SeedAdminDefaults}, which is
+     * where the measurement about {@code @Target({PARAMETER})} lives — the obvious reader returns
+     * {@code null} for every component and would make this population empty.
+     */
+    private static Map<String, String> accountCreatingVariables() {
         var members = new LinkedHashMap<String, String>();
-        Path seeder = Path.of("src/main/java/com/hamstrack/common/seed/DataSeeder.java");
-        Matcher m = Pattern.compile("@Value\\(\"\\$\\{(seed\\.admin\\.[a-z.\\-]+):}\"\\)")
-                .matcher(Files.readString(seeder, StandardCharsets.UTF_8));
-        while (m.find()) {
-            members.put(m.group(1).toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_'),
-                    "DataSeeder reads " + m.group(1) + " with an empty default");
-        }
+        SeedAdminDefaults.declaredDefaults().forEach((component, declaredDefault) -> {
+            if ("".equals(declaredDefault)) {
+                members.put(SeedAdminDefaults.variableFor(component),
+                        "the seeder reads " + SeedAdminDefaults.propertyFor(component)
+                        + " with an empty default");
+            }
+        });
         return members;
     }
 

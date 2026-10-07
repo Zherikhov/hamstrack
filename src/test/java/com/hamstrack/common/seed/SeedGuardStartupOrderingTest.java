@@ -10,6 +10,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.Banner;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.assertj.AssertableApplicationContext;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.boot.tomcat.servlet.TomcatServletWebServerFactory;
@@ -113,6 +114,7 @@ class SeedGuardStartupOrderingTest {
      * from here.
      */
     @Configuration
+    @EnableConfigurationProperties(SeedAdminProperties.class)
     static class Dependencies {
 
         @Bean
@@ -142,8 +144,9 @@ class SeedGuardStartupOrderingTest {
     static class Stubs {
 
         @Bean
-        DataSeeder dataSeeder(UserRepository repository, PasswordEncoder encoder) {
-            return new DataSeeder(repository, encoder);
+        DataSeeder dataSeeder(UserRepository repository, PasswordEncoder encoder,
+                              SeedAdminProperties seedAdmin) {
+            return new DataSeeder(repository, encoder, seedAdmin);
         }
     }
 
@@ -229,8 +232,7 @@ class SeedGuardStartupOrderingTest {
      */
     @Test
     void theStoredHashGuardFiresWhenTheConfigurationMentionsNothing() {
-        var seeder = seederWithPublishedAdmin("published@example.com");
-        setSeedProperties(seeder, "", "");
+        var seeder = seederWithPublishedAdmin("published@example.com", "", "");
 
         assertThatIllegalStateException()
                 .isThrownBy(seeder::refusePublishedCredentials)
@@ -451,8 +453,8 @@ class SeedGuardStartupOrderingTest {
      */
     @Test
     void theStoredHashGuardFiresAfterTheFileIsRepairedInsteadOfTheAccount() {
-        var seeder = seederWithPublishedAdmin("admin@corp.example");
-        setSeedProperties(seeder, "admin@corp.example", "k7Qv2#tR9pLm4zXw");
+        var seeder = seederWithPublishedAdmin(
+                "admin@corp.example", "admin@corp.example", "k7Qv2#tR9pLm4zXw");
 
         assertThatIllegalStateException()
                 .isThrownBy(seeder::refusePublishedCredentials)
@@ -467,8 +469,7 @@ class SeedGuardStartupOrderingTest {
      */
     @Test
     void theStoredHashRefusalIsActionableWithTheApplicationDown() {
-        var seeder = seederWithPublishedAdmin("admin@corp.example");
-        setSeedProperties(seeder, "", "");
+        var seeder = seederWithPublishedAdmin("admin@corp.example", "", "");
 
         String message = refusalFrom(seeder);
         assertThat(message)
@@ -566,8 +567,8 @@ class SeedGuardStartupOrderingTest {
         Mockito.when(repository.findByEmail("late@corp.example"))
                 .thenReturn(Optional.of(admin("late@corp.example", ENCODER.encode(PUBLISHED))));
 
-        var seeder = new DataSeeder(repository, ENCODER);
-        setSeedProperties(seeder, "Late@Corp.Example", "k7Qv2#tR9pLm4zXw");
+        var seeder = new DataSeeder(repository, ENCODER,
+                seedConfiguration("Late@Corp.Example", "k7Qv2#tR9pLm4zXw"));
 
         assertThatIllegalStateException()
                 .describedAs("""
@@ -601,11 +602,11 @@ class SeedGuardStartupOrderingTest {
     @Test
     void anOverLongSeedAdminEmailRefusesTheBootByName() {
         var repository = Mockito.mock(UserRepository.class);
-        var seeder = new DataSeeder(repository, ENCODER);
         // 64 x U+0130 + a 190-character ASCII domain: 255 characters as configured, 319 once folded.
         var foldsOver = "İ".repeat(64) + "@"
                         + "a".repeat(63) + "." + "b".repeat(63) + "." + "c".repeat(62);
-        setSeedProperties(seeder, foldsOver, "k7Qv2#tR9pLm4zXw");
+        var seeder = new DataSeeder(repository, ENCODER,
+                seedConfiguration(foldsOver, "k7Qv2#tR9pLm4zXw"));
 
         assertThatIllegalStateException()
                 .describedAs("""
@@ -624,8 +625,9 @@ class SeedGuardStartupOrderingTest {
         // The other direction: 255 characters that do not grow must still boot.
         var fits = "a".repeat(64) + "@" + "a".repeat(63) + "." + "b".repeat(63) + "." + "c".repeat(62);
         assertThat(fits).hasSize(255);
-        setSeedProperties(seeder, fits, "k7Qv2#tR9pLm4zXw");
-        assertThat(catchThrowable(seeder::refusePublishedCredentials))
+        var storable = new DataSeeder(repository, ENCODER,
+                seedConfiguration(fits, "k7Qv2#tR9pLm4zXw"));
+        assertThat(catchThrowable(storable::refusePublishedCredentials))
                 .describedAs("an address that is exactly the column's width and does not grow under "
                              + "the fold is storable — the bound is `>`, not `>=`")
                 .isNull();
@@ -636,8 +638,8 @@ class SeedGuardStartupOrderingTest {
         // nothing and must not refuse a boot over it. The first round of this guard refused it while
         // its javadoc called blankness of the ADDRESS "the one exemption" — a claim about a list,
         // stale one entry before the list was.
-        setSeedProperties(seeder, foldsOver, "");
-        assertThat(catchThrowable(seeder::refusePublishedCredentials))
+        var noPassword = new DataSeeder(repository, ENCODER, seedConfiguration(foldsOver, ""));
+        assertThat(catchThrowable(noPassword::refusePublishedCredentials))
                 .describedAs("""
                         A boot was refused over an over-long SEED_ADMIN_EMAIL that run() would never \
                         have written: seed.admin.password is blank, so run() logs "skipped" and \
@@ -685,8 +687,7 @@ class SeedGuardStartupOrderingTest {
                 .thenReturn(harmlessAdministrators(25));
         Mockito.when(repository.countBySystemRoleAndPasswordHashIsNotNull(SystemRole.ADMIN)).thenReturn(30L);
 
-        var seeder = new DataSeeder(repository, ENCODER);
-        setSeedProperties(seeder, "", "");
+        var seeder = new DataSeeder(repository, ENCODER, seedConfiguration("", ""));
 
         assertThat(warningsFrom(seeder))
                 .withFailMessage("""
@@ -720,8 +721,7 @@ class SeedGuardStartupOrderingTest {
         // 26 administrators, 22 of them with a password - and all 22 were just verified.
         Mockito.when(repository.countBySystemRoleAndPasswordHashIsNotNull(SystemRole.ADMIN)).thenReturn(22L);
 
-        var seeder = new DataSeeder(repository, ENCODER);
-        setSeedProperties(seeder, "", "");
+        var seeder = new DataSeeder(repository, ENCODER, seedConfiguration("", ""));
 
         assertThat(warningsFrom(seeder))
                 .withFailMessage("""
@@ -774,33 +774,36 @@ class SeedGuardStartupOrderingTest {
         return user;
     }
 
-    private static DataSeeder seederWithPublishedAdmin(String email) {
+    /**
+     * An instance whose database holds an administrator carrying the published password, plus the
+     * {@code seed.admin.*} the instance is CONFIGURED with — which is the distinction every case
+     * using this helper turns on, so it is a parameter rather than a later mutation (HD-326).
+     *
+     * @param offender        the address of the compromised administrator in {@code users}
+     * @param configuredEmail {@code seed.admin.email}, usually {@code ""}: the whole point of the
+     *                        stored-hash guard is the install whose configuration says nothing
+     */
+    private static DataSeeder seederWithPublishedAdmin(
+            String offender, String configuredEmail, String configuredPassword) {
         var repository = Mockito.mock(UserRepository.class);
-        var admin = admin(email, ENCODER.encode(PUBLISHED));
+        var admin = admin(offender, ENCODER.encode(PUBLISHED));
         Mockito.when(repository
                         .findFirst25BySystemRoleAndPasswordHashIsNotNullOrderByCreatedAtAsc(SystemRole.ADMIN))
                 .thenReturn(List.of(admin));
-        return new DataSeeder(repository, ENCODER);
+        return new DataSeeder(repository, ENCODER,
+                seedConfiguration(configuredEmail, configuredPassword));
     }
 
     /**
-     * {@code @Value}-bound fields, set directly because these cases construct the seeder
-     * without a context on purpose: the state they describe is one no property expresses.
+     * The configuration, handed to the constructor (HD-326). These cases build the seeder without
+     * a context on purpose — the states they describe are ones no property expresses — and they
+     * used to do it by reaching into three private {@code @Value} fields with
+     * {@code setAccessible(true)}. The configuration is now a {@link SeedAdminProperties} record
+     * taken as a constructor argument, so the poke is gone and a case that wants two
+     * configurations builds two seeders rather than mutating one between assertions.
      */
-    private static void setSeedProperties(DataSeeder seeder, String email, String password) {
-        set(seeder, "adminEmail", email);
-        set(seeder, "adminDisplayName", "Admin");
-        set(seeder, "adminPassword", password);
+    private static SeedAdminProperties seedConfiguration(String email, String password) {
+        return new SeedAdminProperties(email, password, "Admin");
     }
 
-    private static void set(DataSeeder seeder, String field, String value) {
-        try {
-            var declared = DataSeeder.class.getDeclaredField(field);
-            declared.setAccessible(true);
-            declared.set(seeder, value);
-        } catch (ReflectiveOperationException e) {
-            throw new AssertionError("DataSeeder." + field + " was renamed; this test binds it directly "
-                    + "because it exercises states no configuration can express", e);
-        }
-    }
 }

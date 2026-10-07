@@ -20,8 +20,8 @@ public record StorageProperties(
             String region,
             String endpoint,
             boolean pathStyleAccess,
-            String accessKey,
-            String secretKey,
+            @Credential String accessKey,
+            @Credential String secretKey,
             Timeouts timeouts
     ) {
         /**

@@ -9,7 +9,6 @@ import com.hamstrack.common.security.PasswordLimits;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.context.annotation.Lazy;
@@ -49,14 +48,14 @@ public class DataSeeder implements ApplicationRunner {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
 
-    @Value("${seed.admin.email:}")
-    private String adminEmail;
-
-    @Value("${seed.admin.display-name:Admin}")
-    private String adminDisplayName;
-
-    @Value("${seed.admin.password:}")
-    private String adminPassword;
+    /**
+     * The configuration, bound once (HD-326). It replaced three {@code @Value} fields — the only
+     * three in the production tree — and {@link SeedAdminProperties} carries why that mattered and
+     * why the length bounds deliberately did <strong>not</strong> move onto it. Every component is
+     * {@code @DefaultValue}-backed, so no accessor below needs a null check that the
+     * {@code @Value} defaults used to provide; {@code ""} is "not configured", as it always was.
+     */
+    private final SeedAdminProperties seedAdmin;
 
     /**
      * Every value this project has published under this variable's own name. There is one:
@@ -129,9 +128,9 @@ public class DataSeeder implements ApplicationRunner {
      */
     @PostConstruct
     void refusePublishedCredentials() {
-        rejectPublishedPassword(adminPassword, adminEmail);
-        rejectOverLongPassword(adminPassword, adminEmail);
-        rejectOverLongEmail(adminEmail, adminPassword);
+        rejectPublishedPassword(seedAdmin.password(), seedAdmin.email());
+        rejectOverLongPassword(seedAdmin.password(), seedAdmin.email());
+        rejectOverLongEmail(seedAdmin.email(), seedAdmin.password());
         rejectPublishedAdminHash();
     }
 
@@ -192,7 +191,7 @@ public class DataSeeder implements ApplicationRunner {
      * {@code users_email_lower_uk} is built from. {@link #run} asks {@code findByFoldedEmail} the
      * same question about the same string, so this gate and the early return it models cannot
      * disagree about which row counts. (They did while {@link #run} folded without stripping: a
-     * trailing space survives {@code env_file} and {@code @Value} does not trim, so the guard saw
+     * trailing space survives {@code env_file} and the binder does not trim, so the guard saw
      * the row, stepped aside, and the boot died inside the encoder anyway.) Reading the
      * repository here is safe for the reason {@link #rejectPublishedAdminHash} already relies
      * on: this is a {@code @PostConstruct} on an eager bean, so both the repository and Flyway
@@ -230,8 +229,16 @@ public class DataSeeder implements ApplicationRunner {
 
     /**
      * <strong>The address half of the same statement</strong> (HD-306): {@code seed.admin.email} has
-     * no {@code @Size}, no {@code @Email} and no DTO to annotate — it is a {@code @Value} field — so
-     * the only thing standing between it and {@code users.email VARCHAR(255)} was the INSERT.
+     * no {@code @Size} and no {@code @Email}, so the only thing standing between it and
+     * {@code users.email VARCHAR(255)} was the INSERT.
+     *
+     * <p><strong>And a constraint is not available to it</strong> — HD-326 asked for exactly that and
+     * measured why it cannot be: a bound declared on the property is evaluated at <em>binding</em>
+     * time, which is before the fold has been applied and before anything can be asked about the
+     * password or the existing row, so {@code @Size(max = 255)} both lets the folding case through
+     * and refuses boots this gate must allow. The three measurements are on
+     * {@link SeedAdminProperties}. This is therefore not a guard standing in for an annotation that
+     * nobody got round to writing; it is the only place the question can be asked.
      *
      * <p><strong>MEASURED (2026-09-13), which is what this guard buys:</strong> with a 300-character
      * {@code SEED_ADMIN_EMAIL} the boot died inside {@link #run} with
@@ -276,7 +283,11 @@ public class DataSeeder implements ApplicationRunner {
             return;
         }
         // Stripped first, for the reason run() states at its own fold: a trailing space survives
-        // env_file and @Value does not trim, so the value measured here has to be the value stored.
+        // env_file and the binder does not trim, so the value measured here has to be the value
+        // stored. MEASURED after HD-326 moved these three off @Value: @ConfigurationProperties
+        // binding preserves surrounding whitespace too - `SEED_ADMIN_PASSWORD ` arrives 20
+        // characters long through a real SystemEnvironmentPropertySource - so every strip() in this
+        // class stayed load-bearing across that change rather than becoming decoration.
         String configured = email.strip();
         // 255 is an ADR-0017 repeated literal equal to users.email's width and to the three request
         // doors' bound — a guard that imported the constant it is testing would agree with any value
@@ -448,8 +459,8 @@ public class DataSeeder implements ApplicationRunner {
         }
         // The one the configuration names today, which need not be among the oldest: an
         // install that began seeding years in is exactly the case the ordering above misses.
-        if (adminEmail != null && !adminEmail.isBlank()) {
-            userRepository.findByEmail(adminEmail.strip().toLowerCase(Locale.ROOT))
+        if (!seedAdmin.email().isBlank()) {
+            userRepository.findByEmail(seedAdmin.email().strip().toLowerCase(Locale.ROOT))
                     .filter(user -> user.getSystemRole() == SystemRole.ADMIN)
                     .filter(user -> user.getPasswordHash() != null && !user.getPasswordHash().isBlank())
                     .ifPresent(user -> candidates.put(user.getId(), user));
@@ -468,7 +479,7 @@ public class DataSeeder implements ApplicationRunner {
             // the note on rejectPublishedPassword about where that trade goes the other way.
             log.warn("Published-password check verified {} of the {} system administrators that have a "
                      + "password; {} were not verified (the probe covers the {} oldest, plus the account "
-                     + "seed.admin.email names)",
+                     + "seed.admin.email (SEED_ADMIN_EMAIL) names)",
                     candidates.size(), withPassword, withPassword - candidates.size(), ADMINS_PROBED);
         }
 
@@ -523,12 +534,53 @@ public class DataSeeder implements ApplicationRunner {
         // `restart: unless-stopped` re-opens the window on every crash-loop cycle, forever.
         // SeedGuardStartupOrderingTest seals both the moment (the context fails while
         // refreshing) and its consequence (no WebServerInitializedEvent is ever published).
-        if (adminEmail.isBlank()) {
-            log.info("Admin seeding skipped — seed.admin.email not configured");
+        // BOTH SKIP LINES NAME THE VARIABLE, NOT ONLY THE PROPERTY (HD-326 fix loop). They used to
+        // name `seed.admin.email` and `seed.admin.password` and nothing else, and neither string
+        // appears in any .env, any compose file, any template or the README - so an operator who
+        // greps their own configuration for the name in the log finds nothing. That is the HD-315
+        // defect, in this method, for the second time. The remedy each line prescribes has to be
+        // performable by the person reading it, which is why the password line says "set
+        // SEED_ADMIN_PASSWORD and restart" and not anything about this file.
+        //
+        // AND THE CONDITION IS STATED RATHER THAN THE MODE. On `dc` self-registration is closed
+        // (application-dc.properties), so a skipped seeding can leave an instance with no way in at
+        // all; on `cloud` signup is open and the first user registers. One sentence covers both
+        // because it names what has to be true ("no other administrator and self-registration
+        // off"), not which profile is running - a message that named the profile would be wrong on
+        // the other one, and this class has no business reading the signup flag to find out.
+        //
+        // WHY THESE TWO STAY IN run() WHILE BOTH REFUSALS LIVE IN @PostConstruct. A refusal has to
+        // precede the port binding, and the comment above says why. A SKIP does not: it is a
+        // legitimate configuration (every Cloud install, and every DC install that already seeded
+        // and then deleted the pair), so nothing here may fail the boot, and a WARN logged earlier
+        // would not change the verdict of the healthcheck or of `docker compose up --wait` either -
+        // both read the port, and the port opens whatever this logs. MEASURED on a dc boot with
+        // SEED_ADMIN_PASSWORD_0 set and SEED_ADMIN_PASSWORD unset: the WARN lands ~111 ms AFTER
+        // "Started HamstrackApplication", `up --wait` reports success, and the documented sign-in
+        // answers 401. Moving the line earlier fixes none of that; what the operator was missing is
+        // the variable name and the consequence, which is now in the text. The alternative that
+        // WOULD change the verdict is a refusal, and that is wrong here: an installation that
+        // rotated SEED_ADMIN_PASSWORD out of its .env after seeding must keep booting (see
+        // rejectOverLongPassword's javadoc on the same case), and this branch cannot tell the two
+        // apart without asking the database a question the refusals already ask.
+        if (seedAdmin.email().isBlank()) {
+            log.info("Admin seeding skipped — seed.admin.email (SEED_ADMIN_EMAIL) is not set, so no "
+                     + "administrator account was created or promoted. That is the default, and it is "
+                     + "correct wherever this instance already has an administrator or lets people "
+                     + "register themselves. If neither is true, nobody can sign in: set "
+                     + "SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD and restart.");
             return;
         }
-        if (adminPassword.isBlank()) {
-            log.warn("Admin seeding skipped — seed.admin.email is set but seed.admin.password is empty");
+        if (seedAdmin.password().isBlank()) {
+            log.warn("Admin seeding skipped — seed.admin.email (SEED_ADMIN_EMAIL) is set but "
+                     + "seed.admin.password (SEED_ADMIN_PASSWORD) is empty, so no administrator "
+                     + "account was created or promoted. If this instance has no other administrator "
+                     + "and public self-registration is off, nobody can sign in — and nothing else "
+                     + "says so: this line is logged after the port is open, so the healthcheck "
+                     + "passes and `docker compose up --wait` reports success. Set "
+                     + "SEED_ADMIN_PASSWORD and restart. Check the SPELLING of the variable before "
+                     + "anything else: a misspelled name is delivered to the container just the same, "
+                     + "binds to nothing, and arrives here as empty.");
             return;
         }
         // Lowercase to match login, which looks the email up lowercased. Locale.ROOT for the
@@ -580,7 +632,7 @@ public class DataSeeder implements ApplicationRunner {
         // AND IT STRIPS BEFORE IT FOLDS, which is not tidiness. Every other site that folds the
         // configured address folds it with strip().toLowerCase(Locale.ROOT), and one of them -
         // rejectOverLongPassword - RETURNS on the strength of the row that fold finds. A trailing
-        // space survives env_file and @Value does not trim it, so an unstripped fold here would ask
+        // space survives env_file and the binder does not trim it, so an unstripped fold here would ask
         // about a different key than that guard cleared: the guard would see the existing row and
         // step aside, this lookup would miss it, and the boot would die inside
         // passwordEncoder.encode with the bare "password cannot be more than 72 bytes" the guard
@@ -588,7 +640,7 @@ public class DataSeeder implements ApplicationRunner {
         // address configured with stray whitespace still matches the row it names instead of being
         // refused as somebody else's. A whitespace-only value never reaches here: the isBlank()
         // branch above returned.
-        var email = adminEmail.strip().toLowerCase(Locale.ROOT);
+        var email = seedAdmin.email().strip().toLowerCase(Locale.ROOT);
         var existing = userRepository.findByFoldedEmail(email).orElse(null);
         if (existing != null && !existing.getEmail().equals(email)) {
             // No address in the message, by the same rule the rest of this class follows - the id
@@ -606,19 +658,20 @@ public class DataSeeder implements ApplicationRunner {
             if (existing.getSystemRole() != SystemRole.ADMIN) {
                 existing.setSystemRole(SystemRole.ADMIN);
                 userRepository.save(existing);
-                log.info("Existing seed account promoted to system ADMIN (from seed.admin.email)");
+                log.info("Existing seed account promoted to system ADMIN (from seed.admin.email, "
+                         + "SEED_ADMIN_EMAIL)");
             }
             return;
         }
 
         var admin = new User();
         admin.setEmail(email);
-        admin.setDisplayName(adminDisplayName);
-        admin.setPasswordHash(passwordEncoder.encode(adminPassword));
+        admin.setDisplayName(seedAdmin.displayName());
+        admin.setPasswordHash(passwordEncoder.encode(seedAdmin.password()));
         admin.setStatus(UserStatus.ACTIVE);
         admin.setSystemRole(SystemRole.ADMIN);
         userRepository.save(admin);
 
-        log.info("Admin account created from seed.admin.email");
+        log.info("Admin account created from seed.admin.email (SEED_ADMIN_EMAIL)");
     }
 }

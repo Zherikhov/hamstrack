@@ -308,7 +308,8 @@ public class UndeliverableMail {
                 if (suppressedInWindow > 0) {
                     log.error("{} never-attempted dead-letter row(s) were NOT written in the hour "
                               + "ending now: this instance's cap of {} "
-                              + "(app.mail.dead-letter.max-never-attempted-per-hour) was reached. "
+                              + "(app.mail.dead-letter.max-never-attempted-per-hour, "
+                              + "MAIL_NEVER_ATTEMPTED_MAX_PER_HOUR) was reached. "
                               + "Those emails are recorded only by the ERROR line each one logged. "
                               + "A sustained hour at this cap means the mail queue is saturated — "
                               + "look at the pool and at SMTP before raising the cap.",

@@ -6,7 +6,7 @@ import java.time.Duration;
 
 @ConfigurationProperties(prefix = "jwt")
 public record JwtProperties(
-        String secret,
+        @Credential String secret,
         Duration accessTokenExpiration,
         Duration refreshTokenExpiration
 ) {}

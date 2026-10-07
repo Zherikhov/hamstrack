@@ -53,8 +53,9 @@ public class StorageReconcileSchedule implements SchedulingConfigurer {
     public void configureTasks(ScheduledTaskRegistrar registrar) {
         var cron = properties.reconcileCron();
         if (cron == null || cron.isBlank() || "-".equals(cron.trim())) {
-            log.info("storage usage reconciler is DISABLED (app.storage.quota.reconcile-cron is "
-                     + "empty). The counter is still maintained by its trigger and the quota is "
+            log.info("storage usage reconciler is DISABLED (app.storage.quota.reconcile-cron, "
+                     + "STORAGE_QUOTA_RECONCILE_CRON, is empty). The counter is still maintained "
+                     + "by its trigger and the quota is "
                      + "still enforced; what stops is the check that the counter is still true — "
                      + "hamstrack.storage.drift_refreshed_at_age_seconds will rise and "
                      + "StorageDriftGaugeStale will fire, which is the intended signal");

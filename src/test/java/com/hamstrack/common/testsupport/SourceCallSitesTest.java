@@ -135,4 +135,27 @@ class SourceCallSitesTest {
                 perLine.stream().distinct().toList());
         assertThat(perLine).noneMatch(caller -> caller.endsWith("." + SourceCallSites.FILE_SCOPE));
     }
+
+    /**
+     * {@link SourceCallSites#isCommentedAt(String, int)} on the four shapes it exists for: the
+     * javadoc continuation and the trailing block comment that a line-leading predicate got wrong
+     * in opposite directions, plus the two it must NOT call a comment — a closed block comment
+     * before live code, and an annotation at the head of its own line (HD-326).
+     */
+    @Test
+    void aCommentIsJudgedWhereTheOccurrenceIsAndNotWhereTheLineStarts() {
+        var javadoc = "     * {@code @Value(\"${seed.admin.email:}\")}, which this replaced";
+        var trailing = "        foo(); /* @Value(\"${planted.x}\") */";
+        var reopened = "        /* note */ bar(\"@Value(\");";
+        var live = "    @Value(\"${jwt.secret}\")";
+
+        assertThat(SourceCallSites.isCommentedAt(javadoc, javadoc.indexOf("@Value(")))
+                .as("a javadoc continuation quoting the shape is prose, not a binding").isTrue();
+        assertThat(SourceCallSites.isCommentedAt(trailing, trailing.indexOf("@Value(")))
+                .as("a line that STARTS with code can still carry a commented-out occurrence").isTrue();
+        assertThat(SourceCallSites.isCommentedAt(reopened, reopened.indexOf("@Value(")))
+                .as("a block comment CLOSED before the occurrence leaves it in code").isFalse();
+        assertThat(SourceCallSites.isCommentedAt(live, live.indexOf("@Value(")))
+                .as("the real annotation must stay visible, or every binding leaves the mapping").isFalse();
+    }
 }
