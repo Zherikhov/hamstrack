@@ -1,0 +1,6 @@
+{
+  "task": "HD-921 a pipeline change names the hook's own seal BY NAME, not by path",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"], "sealedBy": "check-gates.test.mjs#AC-1" },
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" } }
+}

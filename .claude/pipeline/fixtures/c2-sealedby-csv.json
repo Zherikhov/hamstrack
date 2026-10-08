@@ -1,0 +1,6 @@
+{
+  "task": "HD-920 a category sealed by two tests, named as one comma-separated string",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"], "sealedBy": "DoorsHarnessTest, InstallClaimsTest" },
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" } }
+}

@@ -19,7 +19,18 @@ let seq = 0;
 const tmp = (name) => join(TMP, `${++seq}-${name}`);
 
 // The table of exits — §6 of docs/design/pipeline-history-proposal.md. A new exit is a deliberate row here, never an omission.
-// A1 has two behavioural rows (a would-block Stop records `escaped`, a clean one records `pass`); they re-use the A4/B2 sites.
+//
+// Two UNITS live in this table and they are deliberately not interchangeable (HD-330):
+//   * a SITE row — one `allow()` / `finish(…)` / `block(…)` call site in the hook. The call-site
+//     arithmetic in the "seal:" test below counts these and only these, so a new exit of the hook
+//     cannot ship without a row.
+//   * a REUSE row — `reuses: "<site id>"`. A behaviour that travels through an existing exit site
+//     and would otherwise be invisible: a value SHAPE the hook must accept, or a refusal whose
+//     WORDING is the deliverable. These sit outside the arithmetic; counting them as sites would
+//     make the hook look like it grew exits it did not grow, and the two units merging back into
+//     one is what the granularity control at the end of the seal test fires on.
+// A1's two rows are the older instance of the same idea (a would-block Stop records `escaped`, a
+// clean one records `pass`) and keep their original `stdin`-keyed handling.
 const EXITS = [
   { id: "A1", fixture: "b2-gates-unmet.json", files: " ", stdin: { stop_hook_active: true }, exit: "finish", verdict: "escaped" },
   { id: "A1", fixture: "a4-pass.json", files: "docs/x.md", stdin: { stop_hook_active: true }, exit: "finish", verdict: "pass" },
@@ -30,8 +41,26 @@ const EXITS = [
   { id: "B2", fixture: "b2-gates-unmet.json", files: " ", exit: "block", reason: /Gate\(s\) not satisfied: security=pending, tests=pending/ },
   { id: "B3", fixture: "b3-category-shape.json", files: "docs/x.md", exit: "block", reason: /no valid "category" block/ },
   { id: "B4", fixture: "b4-one-member-guard.json", files: "src/main/java/com/hamstrack/x/Foo.java", added: "+    @Size(max = 10) String name", exit: "block", reason: /lists one site \(FooRequest\.name\) but the diff adds a bound/ },
-  { id: "B5", fixture: "b5-sealedby-missing.json", files: "docs/x.md", exit: "block", reason: /sealedBy names "NoSuchTestAnywhereInThisTree" but no such test/ },
+  { id: "B5", fixture: "b5-sealedby-missing.json", files: "docs/x.md", exit: "block", reason: /sealedBy: 1 of 1 named seal\(s\) resolve to no file in this repository: "NoSuchTestAnywhereInThisTree"/ },
   { id: "B6", fixture: "b6-no-negative-control.json", files: "docs/x.md", exit: "block", reason: /carries no negative control/ },
+  // HD-330 — two new exit SITES. Both replace a misdiagnosis, not a missing check.
+  { id: "B7", fixture: "b7-class-unknown.json", files: "docs/x.md", exit: "block",
+    reason: /"class" is "epic", which is not one of feature \| light \| trivial/ },
+  { id: "B8", fixture: "b8-gate-shape.json", files: "docs/x.md", exit: "block",
+    reason: /1 of 3 judged gate value\(s\) are not a verdict: security="pass \(round 2 verified\).*reads as "pass" \+ a note.*SHAPE fault, not an unrun gate — do NOT re-dispatch security-officer/s,
+    notReason: /Dispatch security->security-officer/ },
+  // HD-330 — REUSE rows: the shapes the hook must accept, and the refusals whose wording is the ticket.
+  { id: "C1", reuses: "A4", fixture: "c1-sealedby-list.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
+  { id: "C2", reuses: "A4", fixture: "c2-sealedby-csv.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
+  { id: "C3", reuses: "A4", fixture: "c3-sealedby-own-seal.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
+  { id: "C4", reuses: "B5", fixture: "c4-sealedby-partial.json", files: "docs/x.md", exit: "block",
+    reason: /sealedBy: 1 of 3 named seal\(s\) resolve to no file in this repository: "NoSuchSealInThisTree"\. Resolved: "DoorsHarnessTest", "\.claude\/pipeline\/check-gates\.test\.mjs" — only the named one\(s\) above need fixing/,
+    notReason: /no such test exists|"DoorsHarnessTest", "NoSuchSealInThisTree"/ },
+  { id: "C5", reuses: "A4", fixture: "c5-gate-note-object.json", files: "src/main/java/com/hamstrack/x/Foo.java", exit: "finish", verdict: "pass" },
+  { id: "C6", reuses: "B3", fixture: "c6-category-field-named.json", files: "docs/x.md", exit: "block",
+    reason: /no valid "category" block: "members" must be a JSON array of names \(got "A, B"\)/, notReason: /"rule" must be|"sealedBy" must name/ },
+  { id: "C7", reuses: "A4", fixture: "c7-tests-note-toplevel-control.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
+  { id: "C8", reuses: "A4", fixture: "c8-sealedby-method.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
 ];
 
 function cleanEnv() {
@@ -63,6 +92,10 @@ test("AC-1 every finishing exit appends exactly one line; every blocking exit an
     if (row.exit === "block") {
       assert.match(r.stdout, /"decision":"block"/, `${row.id}: must block`);
       assert.match(JSON.parse(r.stdout).reason, row.reason, `${row.id}: reason`);
+      // `notReason` is how a row says what the refusal must STOP saying — the half a row carrying
+      // only a positive match cannot hold, and the half HD-330 was filed about (a shape fault
+      // prescribing a re-dispatch; a partial-seal refusal quoting back the seals that resolved).
+      if (row.notReason) assert.doesNotMatch(JSON.parse(r.stdout).reason, row.notReason, `${row.id}: the refusal still says what it must not`);
       assert.equal(recs.length, 0, `${row.id}: a blocking exit records nothing`);
     } else {
       assert.equal(r.stdout, "", `${row.id}: an allowed finish prints nothing`);
@@ -168,10 +201,13 @@ test("seal: the exits of check-gates.mjs are exactly the rows of the table above
   const src = readFileSync(HOOK, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
   const calls = (name) => (src.match(new RegExp(`(?<!function\\s)\\b${name}\\s*\\(`, "g")) || []).length;
   const exits = (src.match(/\bprocess\.exit\s*\(/g) || []).length;
+  // Only SITE rows enter the arithmetic; a reuse row travels through a site another row already owns.
+  const sites = EXITS.filter((r) => !r.reuses);
+  const reuse = EXITS.filter((r) => r.reuses);
   const rows = {
-    finish: EXITS.filter((r) => r.exit === "finish" && r.verdict === "pass" && !r.stdin).length + EXITS.filter((r) => r.exit === "finish" && r.verdict === "escaped").length,
-    allow: EXITS.filter((r) => r.exit === "allow").length,
-    block: EXITS.filter((r) => r.exit === "block").length,
+    finish: sites.filter((r) => r.exit === "finish" && r.verdict === "pass" && !r.stdin).length + sites.filter((r) => r.exit === "finish" && r.verdict === "escaped").length,
+    allow: sites.filter((r) => r.exit === "allow").length,
+    block: sites.filter((r) => r.exit === "block").length,
   };
   const msg = (what, got, want) => `${what}: check-gates.mjs has ${got} call sites, the table accounts for ${want}. A new exit of the hook is a deliberate row in EXITS (and §6 of the HD-303 spec) stating what it records — add the row, never leave the exit unlisted.`;
   assert.equal(calls("finish"), rows.finish, msg("finish(…)", calls("finish"), rows.finish));
@@ -183,7 +219,22 @@ test("seal: the exits of check-gates.mjs are exactly the rows of the table above
   const a1 = EXITS.filter((r) => r.id === "A1");
   assert.deepEqual(a1.map((r) => r.verdict).sort(), ["escaped", "pass"], "D6 is held by two A1 rows — a would-block Stop under stop_hook_active records escaped, a clean one records pass; deleting either leaves the loop guard sealed by source text only");
   assert.ok(a1.every((r) => r.stdin && r.stdin.stop_hook_active === true), "both A1 rows run with stop_hook_active on stdin");
-  assert.equal(EXITS.length, 11, `the table has ${EXITS.length} rows; the spec has 10 exits and A1 has two behavioural rows — a removed row is never a legal shortening`);
+
+  // Granularity control (HD-330). The population of this table is SITES and REUSE ROWS, and the
+  // arithmetic above asks its question of sites only. If a future change merges the two units back
+  // into one — a reuse row losing `reuses`, or a site row acquiring it — the arithmetic silently
+  // changes what it measures while staying green, which is the shape that reads as coverage and is
+  // not. So: every reuse row names a site row that exists, no site row names one, and both
+  // populations carry a floor. The only honest count is the one this message computes.
+  const siteIds = new Set(sites.map((r) => r.id));
+  const orphans = reuse.filter((r) => !siteIds.has(r.reuses));
+  assert.deepEqual(orphans.map((r) => `${r.id}->${r.reuses}`), [],
+    `reuse row(s) name a site that is not in the table: ${orphans.map((r) => `${r.id} reuses ${r.reuses}`).join(", ")}. A reuse row travels through an existing exit; if that exit is gone, the row is a site row and belongs in the arithmetic.`);
+  assert.equal(new Set(reuse.map((r) => r.id)).size, reuse.length, "every reuse row has its own id — two rows sharing one id hide a deleted behaviour");
+  assert.ok(sites.length >= 11, `${sites.length} site rows; the floor is 11 (A1 x2, A2, A3, A4, B1-B8 minus A1's second row) — a removed exit row is never a legal shortening`);
+  assert.ok(reuse.length >= 8,
+    `${reuse.length} reuse rows; the floor is 8. Each one is a value SHAPE the hook must accept or a refusal WORDING that was the deliverable of a ticket (HD-301's Class#method seal, HD-330's seal list, own-seal-by-name, note-bearing gates, field-named category faults). Deleting one deletes the only thing that notices the behaviour came back.`);
+  assert.equal(EXITS.length, sites.length + reuse.length, "every row is exactly one of the two units");
 });
 
 // --- checkpoint ------------------------------------------------------------------------------
@@ -266,7 +317,7 @@ test("AC-9 documented: the procedure, the skill line and the ignore rules exist"
 // `sealedBy` string as a file name, so `Class#method` — the form every "test:" pointer in CLAUDE.md
 // uses, and the form that says WHICH test holds the category — was refused as a missing file.
 test("a seal named in CLAUDE.md's own Class#method form resolves to the class that holds it", () => {
-  const r = runHook({ runPath: fixture("b7-sealedby-method.json"), history: join(TMP, "b7-history.jsonl") });
+  const r = runHook({ runPath: fixture("c8-sealedby-method.json"), history: join(TMP, "c8-history.jsonl") });
   assert.equal(r.status, 0, `the hook refused a seal that exists: ${r.stdout}${r.stderr}`);
   assert.doesNotMatch(r.stdout, /sealedBy names/, "the hook resolved the #method half as part of the file name");
   // The class really is there, so a green here is not green-because-absent.

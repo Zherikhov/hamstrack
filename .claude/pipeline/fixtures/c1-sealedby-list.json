@@ -1,0 +1,7 @@
+{
+  "task": "HD-919 a category sealed by three tests, named as a JSON array (the HD-314 shape)",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"],
+    "sealedBy": ["DoorsHarnessTest", "InstallClaimsTest", ".claude/pipeline/check-gates.test.mjs"] },
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" } }
+}

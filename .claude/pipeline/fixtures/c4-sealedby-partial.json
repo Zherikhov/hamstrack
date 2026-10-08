@@ -1,0 +1,7 @@
+{
+  "task": "HD-922 one named seal of three resolves to nothing",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"],
+    "sealedBy": ["DoorsHarnessTest", "NoSuchSealInThisTree", ".claude/pipeline/check-gates.test.mjs"] },
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" } }
+}

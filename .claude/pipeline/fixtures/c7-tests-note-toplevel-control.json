@@ -1,0 +1,7 @@
+{
+  "task": "HD-925 the tests gate grows a note and keeps its negative control at the top level",
+  "class": "feature",
+  "category": { "n/a": "fixture" },
+  "negativeControl": "seen: FixtureTest red with the guard commented out",
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "note": "308 classes, 0 failures" } }
+}

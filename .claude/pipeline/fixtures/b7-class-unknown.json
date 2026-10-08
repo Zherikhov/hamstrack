@@ -1,0 +1,6 @@
+{
+  "task": "HD-917 class is a token the hook does not know",
+  "class": "epic",
+  "category": { "n/a": "fixture" },
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" } }
+}

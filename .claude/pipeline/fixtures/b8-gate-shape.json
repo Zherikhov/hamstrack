@@ -1,0 +1,10 @@
+{
+  "task": "HD-918 a gate value carries its verdict inside prose",
+  "class": "feature",
+  "category": { "n/a": "fixture" },
+  "gates": {
+    "spec": "pass",
+    "security": "pass (round 2 verified): the evidence the orchestrator had nowhere else to put",
+    "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" }
+  }
+}

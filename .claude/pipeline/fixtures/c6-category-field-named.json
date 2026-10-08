@@ -1,0 +1,6 @@
+{
+  "task": "HD-924 category.members is a comma-separated string, not an array",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": "A, B", "sealedBy": "DoorsHarnessTest" },
+  "gates": { "spec": "pass", "security": "pass", "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" } }
+}

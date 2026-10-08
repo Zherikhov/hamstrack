@@ -109,13 +109,15 @@ Do not offer to commit — the owner commits.
   "class": "feature",                      // feature | light | trivial
   "spec": "docs/design/x-proposal.md",
   "changed": ["<absolute changed paths>"],
+  "class": "feature",                      // a BARE token: feature | light | trivial. Nothing else, and never prose.
   "category": {                            // X1 — or {"n/a": "<why this change adds no rule>"}
     "rule": "every request-reachable text field is bounded to its column",
-    "members": ["RegisterRequest.email", "InviteMemberRequest.email", "..."],
-    "sealedBy": "RequestFieldLengthBoundTest"
+    "members": ["RegisterRequest.email", "InviteMemberRequest.email", "..."],  // an ARRAY always; never split on commas
+    "sealedBy": ["RequestFieldLengthBoundTest", "DoorsHarnessTest#everyPopulationClearsItsFloor"]
   },
-  "gates": {                               // pass | fail | pending | n/a
-    "spec": "pass", "tenancy": "pass", "security": "pass",
+  "gates": {                               // every value: a BARE token (pass | fail | pending | n/a)
+    "spec": "pass", "tenancy": "pass",     //   ...or {"status": "<token>", "note": "<the evidence>"}
+    "security": { "status": "pass", "note": "round 2 verified: NEW-H1 fixed, re-reviewed on the fixed diff" },
     "migration": "n/a", "dc_cloud": "n/a", "api_docs": "pass", "ops_witness": "n/a", "ui_qa": "n/a",
     "tests": { "status": "pass", "negativeControl": "seen: RequestFieldLengthBoundTest red with @Size removed from InviteMemberRequest" }
   }
@@ -123,3 +125,17 @@ Do not offer to commit — the owner commits.
 ```
 Write a gate `"pass"` only after reading the agent's verdict. The hook derives the required set from the real diff, so a
 forgotten gate still blocks the finish. `run.json` is gitignored transient state.
+
+**One value shape, everywhere the hook judges (HD-330).** `class` and every *judged* gate take a bare verdict token **or**
+`{"status": "<token>", "note": "<anything you need to say>"}` — the shape `gates.tests` has always used. Put the round
+number, the re-review, the reason for an `n/a`, the link, the counts in `note`; the hook records the whole object. What it
+will not do is read a verdict out of prose: `"pass (round 2): …"` is refused as a **shape** fault that names where the note
+belongs, and explicitly tells you *not* to re-dispatch the agent, because prose on a gate usually means the agent reported.
+(Before HD-330 that same value was refused as an unrun gate and prescribed the re-dispatch — it misfired 20 times in
+`history.jsonl`.) A gate the diff did not arm is recorded verbatim and never parsed.
+
+**`sealedBy` takes more than one seal.** A JSON array, or one comma-separated string. Every member is resolved
+independently and the refusal names only the ones that did not resolve — so a change held by three tests records three,
+instead of naming one and demoting the rest into `members` prose (HD-314 did exactly that). A seal may be `TestClass`,
+`TestClass#method`, a `*.test.*` file name or a repo-relative path, and it is looked for **anywhere in the repository** —
+including `.claude/pipeline/`, so a change to the pipeline can name its own seal (`check-gates.test.mjs`) by name.

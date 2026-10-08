@@ -160,13 +160,30 @@ Rule: *every exit of the hook states whether it is a finish and what it records.
 | B2 | 105 | gates unmet | nothing |
 | B3 | 114 | category shape | nothing |
 | B4 | 118 | one-member category + guard in diff | nothing |
-| B5 | 124 | `sealedBy` names no test | nothing |
+| B5 | 124 | `sealedBy`'s named seals resolve to no file | nothing |
 | B6 | 132 | tests gate without negative control | nothing |
+| B7 | — | `class` is not one of `feature \| light \| trivial` (HD-330) | nothing |
+| B8 | — | a judged gate value is not a verdict — a SHAPE fault (HD-330) | nothing |
 
-Seal: `check-gates.test.mjs` counts `allow()` and `block(` call sites in the hook source (**4** and **6** today)
-and fails when a count changes without this table changing — a new exit is a deliberate row, never an omission.
-`category.sealedBy: ".claude/pipeline/check-gates.test.mjs"` passes the hook via `existsSync` (`:124`); the
-name matches `TEST_RE` (`:55`), so the `tests` gate arms for this very run.
+The line numbers are the 2026-09-08 reading and are not maintained; the exit's **identity** is the row, and
+`check-gates.test.mjs` resolves it from the source on every run.
+
+Seal: `check-gates.test.mjs` counts `allow()`, `finish(` and `block(` call sites in the hook source and fails
+when a count changes without this table changing — a new exit is a deliberate row, never an omission. The live
+counts are computed by the failure message, not stated here, because a number in a doc goes stale one entry
+before its list does.
+
+**Two units in that table (HD-330).** A *site* row is one exit call site and is what the arithmetic counts. A
+*reuse* row (`reuses: "<site id>"`) is a behaviour that travels through a site another row owns — a value
+**shape** the hook must accept, or a refusal **wording** that was a ticket's deliverable — and sits outside the
+arithmetic. The seal ends with a granularity control: every reuse row must name a site row that exists, no site
+row may carry `reuses`, and both populations carry a floor. Merging the two units back into one would silently
+change what the arithmetic measures while staying green, which is the shape that reads as coverage and is not.
+
+`category.sealedBy: ".claude/pipeline/check-gates.test.mjs"` passed the hook only via the `existsSync` path
+fallback until HD-330; the resolver's roots were the stated list `src/test` + `src/main/frontend`, so the same
+seal **by name** was refused and a pipeline change was told it had no test. The roots are now derived (the whole
+repository), and the name matches `TEST_RE`, so the `tests` gate arms for this very run.
 
 ## 7–9. Data model / API / Frontend / DC-Cloud — none
 
@@ -190,6 +207,8 @@ name matches `TEST_RE` (`:55`), so the `tests` gate arms for this very run.
 9. **Documented:** §12.6 exists with the command and date 2026-09-21; SKILL.md carries the line; the local README
    table exists; `git check-ignore -v` names the rule for both `.jsonl` files (the `.gitignore:146` habit).
 10. `category` on the ticket: rule = §6, members = A1…B6, sealedBy = `.claude/pipeline/check-gates.test.mjs`.
+    *(As filed 2026-09-08. The live member list is the §6 table and is the thing to read — HD-330 added B7 and B8
+    to it on 2026-10-08, which is why an enumeration belongs in one place and a pointer everywhere else.)*
 
 ## 11. Open questions (recommended default)
 1. Log under `stop_hook_active`? **Yes, per D6** — after the builder's measured drill. 2. Record `changed`? **No**

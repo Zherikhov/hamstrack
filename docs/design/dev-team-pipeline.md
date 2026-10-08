@@ -167,9 +167,9 @@ A per-task JSON the orchestrator maintains and the hook reads. Suggested locatio
   "areas": { "backend": true, "frontend": true, "migration": true,
              "config": false, "api": true },
   "gates": {
-    "spec":        "pass",         // pass | fail | pending | n/a
-    "tenancy":     "pass",
-    "security":    "pass",
+    "spec":        "pass",         // a BARE token: pass | fail | pending | n/a ...
+    "tenancy":     { "status": "pass", "note": "round 2, re-reviewed on the fixed diff" },
+    "security":    "pass",         // ... or {"status": "<token>", "note": "<evidence>"} — HD-330, one shape everywhere
     "migration":   "pass",         // set only because areas.migration=true
     "dc_cloud":    "n/a",
     "api_docs":    "pass",
@@ -317,8 +317,10 @@ Eleven project-native agents, each with explicit `model:` / `effort:` frontmatte
 Class-mandated gates (`spec`, `security`, `tests` for feature; `tests` for light) cannot be `n/a`; conditional gates may be `n/a` only when the diff did not arm them.
 
 ### 12.3 New fields in `run.json`
-- **`category`** (X1): `{ "rule", "members": [...], "sealedBy" }` or `{ "n/a": "<reason>" }`. The hook refuses a missing block, a one-member category when the diff adds a bound/guard/rule (`@Size/@Min/@Max/@NotBlank/@Pattern/@Email/@Scheduled`, `Locale.ROOT`, `requireAndRecord`, `PerPrincipalMinuteBudget`, `AfterCommit`, `require(Permission.`, `mem_limit`, `@Column(length`), and a `sealedBy` that names no existing test.
-- **`gates.tests`** (X2): `{ "status": "pass", "negativeControl": "seen: <test> red against <what was planted or reverted>" }` or `"n/a: <reason>"`; a bare `"pass"` without `run.negativeControl` is refused.
+- **`category`** (X1): `{ "rule", "members": [...], "sealedBy" }` or `{ "n/a": "<reason>" }`. The hook refuses a missing block, a one-member category when the diff adds a bound/guard/rule (`@Size/@Min/@Max/@NotBlank/@Pattern/@Email/@Scheduled`, `Locale.ROOT`, `requireAndRecord`, `PerPrincipalMinuteBudget`, `AfterCommit`, `require(Permission.`, `mem_limit`, `@Column(length`), and a `sealedBy` whose named seals resolve to no file. Each malformed sub-field is **named as itself** (HD-330): a `members` string, an empty array, a blank `n/a` and an unresolvable seal used to share one refusal that said only "no valid category block".
+- **`category.sealedBy`** takes **one seal, a JSON array of them, or one comma-separated string** (HD-330). Every member is resolved independently and the refusal names only the ones that did not resolve, with a computed `N of M`. A seal is `TestClass`, `TestClass#method`, a `*.test.*` file name or a repo-relative path, and the admitted roots are **derived — the whole repository**, tracked plus untracked-and-not-ignored. The stated list it replaced (`src/test` + `src/main/frontend`) could not see the Stop hook's own seal by name, so a pipeline change was told it had none; HD-330 was itself filed `no-seal` on the strength of that answer. A change held by several tests records several instead of demoting the rest into `members` prose — the shape four specs in `docs/design/` had already written in prose before the hook could take it.
+- **`class` and every judged gate** (HD-330): a **bare verdict token**, or `{"status": "<token>", "note": "<evidence>"}` — the shape `gates.tests` has carried since HD-293, now uniform. Prose is refused as a **shape** fault that names where the note belongs and says *not* to re-dispatch: a gate carrying prose has usually been run, and the old refusal prescribed re-running it (measured over `history.jsonl`: 20 records, 0 of which the shape rule newly refuses — this changed messages, never verdicts). An unrecognised `class` is refused instead of silently becoming `feature`. A gate the diff did not arm is recorded verbatim and never parsed.
+- **`gates.tests`** (X2): `{ "status": "pass", "negativeControl": "seen: <test> red against <what was planted or reverted>" }`, where the control may instead read `"n/a: <reason>"`; a `"pass"` with no control in either the gate object or top-level `run.negativeControl` is refused. Both forms reach the top-level fallback (before HD-330 only the bare-string form did, so adding a `note` to this gate moved a passing run's control out of sight).
 
 ### 12.4 Policies
 - **Evidence labels (X6):** every claim in a spec, report or ticket is measured / read / inferred; each review contains at least one measured item; the builder's first report is the measured premise.

@@ -1,0 +1,11 @@
+{
+  "task": "HD-923 every judged gate carries its verdict as a token plus a note",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"], "sealedBy": "check-gates.test.mjs" },
+  "gates": {
+    "spec": { "status": "pass", "note": "round 1: the analyst reported" },
+    "security": { "status": "pass", "note": "round 2 verified: the evidence that had to live in a side channel before HD-330" },
+    "tenancy": { "status": "n/a", "note": "no query, no entity, no request path" },
+    "tests": { "status": "pass", "note": "308 classes", "negativeControl": "seen: FixtureTest red" }
+  }
+}
