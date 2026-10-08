@@ -1601,28 +1601,36 @@ place of `:X.Y.Z` on the third line removes the one thing a hand check can still
 `X.Y` or otherwise moving tag pointing somewhere else by the time you run it. That is the same
 reason the job itself stopped pulling by tag.
 
-> **STANDING LINE — DELETE THIS BLOCK, DO NOT RE-DATE IT.** The *published* half of this step —
-> commands 1 and 2, the two that touch a real Release — **has never been run, on any date.** The
-> step has two halves and only one of them has a subject today, so a re-run of the identity half
-> plus a fresh `Measured` date below would read exactly like a run of the whole step. Whoever
-> first runs commands 1 and 2 against a Release that actually carries the two files deletes this
-> block and writes the readings in its place. While it is here, this step is half-verified
-> however recent the date under it looks. <!-- marker: no-published-jar-assets-yet -->
+Measured 2026-10-08 against `v0.18.3`, **the first release that carries the two assets, so this
+is the first run of the step's published half on any date** — the standing warning that used to
+stand here, and its three copies in README, `docs/self-hosting.md` and
+`docs/self-hosting-upgrades.md`, came out in the same commit as this reading.
 
-**The block above is one copy of that warning, and every copy is deleted together.** README,
-`docs/self-hosting.md` and `docs/self-hosting-upgrades.md` each tell a reader that no release
-carries the two assets yet; every copy carries the same HTML comment marker, and
-`UnpublishedAssetWarningTest` refuses a tree where some carry it and some do not — its failure
-message lists them. So the first tag that publishes the assets deletes all of them in one commit,
-this block included, which is why re-dating the `Measured` line below cannot quietly turn this
-step into a fully-run one.
+All three commands, in order. Command 1 listed exactly `hamstrack-0.18.3.jar` and
+`hamstrack-0.18.3.jar.sha256` and nothing else. Command 2 downloaded them and
+`sha256sum -c` answered `hamstrack-0.18.3.jar: OK`, the published checksum reading
+`1a48e8687631078aaa49162fa16780e67bd3ee1532ce05f765eab103257be0a6`. Command 3, run **by digest**
+(`ghcr.io/zherikhov/hamstrack@sha256:e3b15ad4be1544c4fceaef0848d15cfb4533a025e9a998935f8818327f294840`,
+the reference the Build summary records) returned that same hash for `/app/app.jar` — so the asset
+an operator downloads and the file the container runs are the same bytes, established without
+trusting the job that produced both the file and the hash beside it. The asset's
+`META-INF/build-info.properties` reads `build.version=0.18.3`, not `0.0.0-DEV`.
 
-Measured 2026-10-02, and **the departure is the first two commands**: `gh release view
-v0.18.2 --json assets` answers `{"assets":[],"tagName":"v0.18.2"}`, and all ten releases the
-repository has (`v0.13.0` … `v0.18.2`) answer `assets` of length `0` — no tag has yet been cut
-with the publishing step in place, so the *published* half of this step has nothing to read and
-is the first thing to run on the first tag that carries it.
-What was run is the identity half, against two real images. The released `0.18` image:
+**Where the run departed from what this page prescribes, which is the part worth recording.** On
+Windows under Git Bash, command 3 as written fails: MSYS rewrites the container path `/app/app.jar`
+into a host path and `sha256sum` answers
+`'C:/Program Files/Git/app/app.jar': No such file or directory`. The image is fine and the digest
+pulls correctly — only the argument is mangled. Prefix the command with `MSYS_NO_PATHCONV=1`, or
+write the path as `//app/app.jar`. A reader on Linux or macOS meets none of this; a reader on this
+machine would otherwise read a path error as a missing JAR.
+
+Measured 2026-10-02, kept because it is what the identity half was proved against before any
+Release carried the assets, and **the departure then was the first two commands**: `gh release
+view v0.18.2 --json assets` answered `{"assets":[],"tagName":"v0.18.2"}`, and all ten releases
+that existed (`v0.13.0` … `v0.18.2`) answered `assets` of length `0` — no tag had yet been cut
+with the publishing step in place, so the *published* half of this step had nothing to read, and
+the 2026-10-08 reading above is its first run.
+What was run on that date is the identity half, against two real images. The released `0.18` image:
 `/app/app.jar` hashes `79784f5244257c78ac67b0417ccdfb5050f7c77a1abd03fbe31155bfd45ec82d`,
 `docker create` + `docker cp` produced a file with that same digest, `sha256sum -c` answered
 `hamstrack-0.18.2.jar: OK`, and the extracted JAR's `build.version` reads `0.18.2`. One

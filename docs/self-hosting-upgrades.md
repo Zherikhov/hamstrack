@@ -808,11 +808,10 @@ path is now documented, which this paragraph used to say it was not.
 is the section for it: **still not a second supported deployment model**, but a listed
 hand-over of what the container does, this locale pin among it.
 
-<!-- marker: no-published-jar-assets-yet -->
-HD-321 also made each release *publish* the JAR and its SHA-256 as assets — **from the
-next tag onwards, not retrospectively: measured 2026-10-02, every existing release
-answers `assets: []`**, so until one carries them the JAR you run is one you built. If
-that is you:
+HD-321 also made each release *publish* the JAR and its SHA-256 as assets — **not
+retrospectively: measured 2026-10-08, `v0.18.3` is the first that carries them and every
+release up to `v0.18.2` answers `assets: []`**, so for an earlier version the JAR you run is
+one you built. If that is you:
 
 ```bash
 java -Duser.language=en -Duser.country=US -jar target/hamstrack-<version>.jar

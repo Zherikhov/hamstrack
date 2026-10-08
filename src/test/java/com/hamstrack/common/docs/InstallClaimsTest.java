@@ -1010,11 +1010,18 @@ class InstallClaimsTest {
      *
      * <p><strong>What this therefore does not hold, stated so nobody reads it as held:</strong> a
      * step whose subject is a single tag rather than the line. Step 6 is the one in the tree today
-     * &mdash; the JAR asset on a Release belongs to the tag that cut it &mdash; and what holds its
-     * published half is not a date but the standing block in that step plus
-     * {@code UnpublishedAssetWarningTest}, which keeps every copy of the "no release carries the
-     * assets yet" warning alive or deleted together. Making a step per-tag is a change to the
-     * section's own "once per *line*, not per patch" rule, i.e. a deliberate edit there first.
+     * &mdash; the JAR asset on a Release belongs to the tag that cut it &mdash; so its reading names
+     * one tag, while this rule only asks whether something in that step was measured since the
+     * current line opened: a later tag on the same line publishes its own pair of assets and nothing
+     * here asks for them. Nothing else holds it either, and that is new. Until 2026-10-08 the step's
+     * published half had no subject at all &mdash; no Release carried the assets &mdash; and a
+     * standing block in the step, coupled by a marker to its copies in the install documents and to
+     * an HD-321 rule over that marker, is what stopped a re-dating of the identity half reading as a
+     * run of the whole step. {@code v0.18.3} is the first release that carries the two assets, so
+     * that warning became a claim about nothing and the block, its copies and the rule holding them
+     * together went in one commit, the step's first published reading in their place. Making a step
+     * per-tag is a change to the section's own "once per *line*, not per patch" rule, i.e. a
+     * deliberate edit there first.
      */
     @Test
     void theInstallChecklistStepsWereRunOnThisReleaseLine() {

@@ -526,20 +526,14 @@ Two reasons this project publishes the JAR at all, and they are the only two it 
 
 A release on the [Releases page](https://github.com/Zherikhov/hamstrack/releases) that carries
 this path publishes two assets: `hamstrack-<version>.jar` and `hamstrack-<version>.jar.sha256`.
-The Releases page lists each asset's size beside it; no size is quoted here, because nobody has
-had a published asset to weigh.
+The Releases page lists each asset's size beside it, which is where to read the current one.
 
-<!-- marker: no-published-jar-assets-yet -->
-**Which releases those are, as a date rather than a tense: measured 2026-10-02, none of them.**
-`v0.18.2` — the newest — and every release before it answer `assets: []`; the publishing step
-exists in `.github/workflows/build.yml` but the assets appear only on the **next tag cut after
-it**, because a Release's files are produced by the run that cuts it and no such run has
-happened. So if the newest release lists no files, this path has no published artefact yet and
-the container above is the one that works today; building the JAR from a clone is reachable but
-gives you a `0.0.0-DEV` version string (see below) and none of the identity guarantees here.
-Delete this paragraph once a release carries the two files — do not re-date it. It is not the only
-copy of this warning: every copy carries the HTML comment marker above, the first tag that publishes
-the assets deletes all of them in one commit, and `UnpublishedAssetWarningTest` names the rest.
+**Which releases carry them, as a date rather than a tense: measured 2026-10-08, `v0.18.3`
+onwards.** It is the first one, and the assets appear only on a tag cut after the publishing step
+shipped, because a Release's files are produced by the run that cuts it — so every release up to
+and including `v0.18.2` answers `assets: []` and this path has no artefact for those versions.
+Building the JAR from a clone is reachable for any version but gives you a `0.0.0-DEV` version
+string (see below) and none of the identity guarantees here.
 
 From the directory you downloaded into:
 

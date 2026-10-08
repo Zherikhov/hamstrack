@@ -67,8 +67,7 @@ Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` / `SEED_AD
 
 To pin a release line rather than track the current one, set `APP_IMAGE_TAG` in `deploy/dc/.env`; the template names the current line and says why `latest` is the wrong answer.
 
-<!-- marker: no-published-jar-assets-yet -->
-**Running it without Docker is possible and is not a peer of the path above.** From the next release onwards (measured 2026-10-02: no existing release carries them yet) a release also publishes `hamstrack-<version>.jar` and its SHA-256, taken out of the image of the same tag so the two run identical bytes — for an operator who already runs JVM services and is knowingly taking on what the container does (supervision, the heap bound, the JVM locale pins, the management port, the memory ceiling). The list of exactly what that is: [Without Docker](docs/self-hosting.md#without-docker-the-jar-and-what-you-take-on-with-it). It is not the lighter option, and if any item on that list is new to you the container is the better answer.
+**Running it without Docker is possible and is not a peer of the path above.** A release also publishes `hamstrack-<version>.jar` and its SHA-256, taken out of the image of the same tag so the two run identical bytes — for an operator who already runs JVM services and is knowingly taking on what the container does (supervision, the heap bound, the JVM locale pins, the management port, the memory ceiling). The list of exactly what that is: [Without Docker](docs/self-hosting.md#without-docker-the-jar-and-what-you-take-on-with-it). It is not the lighter option, and if any item on that list is new to you the container is the better answer.
 
 **→ Full walkthrough: [Self-hosting guide](docs/self-hosting.md)** — complete configuration reference, TLS / reverse proxy, email (SMTP), attachment storage, upgrades and backups.
 
