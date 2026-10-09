@@ -311,6 +311,26 @@ test("AC-9 documented: the procedure, the skill line and the ignore rules exist"
   assert.equal(spawnSync("git", ["check-ignore", "-q", ".claude/pipeline/fixtures/a4-pass.json"], { cwd: ROOT }).status, 1, "fixtures are tracked");
 });
 
+// HD-330 round 2. §6 of the HD-303 proposal states the SAME category this table states, and nothing
+// compared them — so B7 and B8 reached that section only because a human remembered to put them
+// there. The comparison was not worth writing before this file ran on an automated path
+// (PipelineSealExecutionTest): a seal nobody runs cannot hold a document either. Compared over the
+// SITE ids and nothing else — the doc's line-number column declares itself unmaintained in its own
+// prose, and the reuse rows live in that section as prose rather than as table rows, so demanding
+// them from the table would be demanding a different table.
+test("the proposal's §6 exit table lists exactly the site ids of the table above", () => {
+  const doc = readFileSync(join(ROOT, "docs/design/pipeline-history-proposal.md"), "utf8");
+  const start = doc.indexOf("## 6. Category");
+  assert.ok(start >= 0, "docs/design/pipeline-history-proposal.md has no '## 6. Category' heading: the section was renamed or removed. Re-point this test at it — the category still has to be stated in one place that a reader of the spec reaches.");
+  const next = doc.indexOf("\n## ", start + 1);
+  const section = next < 0 ? doc.slice(start) : doc.slice(start, next);
+  const listed = [...section.matchAll(/^\| ([AB]\d+) \|/gm)].map((m) => m[1]);
+  assert.ok(listed.length >= 12, `§6's exit table holds ${listed.length} row(s); the floor is 12 (A1-A4, B1-B8, read 2026-10-09). A scan that can pass over an empty table is not a scan — if the table really did shrink, an exit was deleted and the call-site arithmetic above is the thing to read.`);
+  const sites = [...new Set(EXITS.filter((r) => !r.reuses).map((r) => r.id))].sort();
+  assert.deepEqual([...new Set(listed)].sort(), sites,
+    "§6 of docs/design/pipeline-history-proposal.md and the EXITS table above state one category and disagree. Add the missing row (id, what the exit is, what it records) or delete the stale one. The doc's line-number column is declared unmaintained there and is NOT compared; the reuse rows (C*) are prose in that section, not table rows.");
+});
+
 // HD-301. The counterpart of the B5 row, which the EXITS table cannot hold: B5 asserts the REFUSAL
 // fires on a seal that does not exist, and a fixture that only ever asserts a refusal cannot notice
 // that the same refusal fires on a VALID input too. Until this ticket the hook resolved the whole
