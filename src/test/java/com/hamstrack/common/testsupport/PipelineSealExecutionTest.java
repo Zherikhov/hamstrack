@@ -81,10 +81,13 @@ class PipelineSealExecutionTest {
     /**
      * A floor on the DECLARED count, which the derived bound cannot supply on its own: a seal
      * gutted to one trivial case lowers {@code declared} and the run would still agree with it.
-     * 12 on 2026-10-09 (11 shipped by HD-303 plus the §6 comparison added with this class). Raise
-     * it deliberately; never lower it to make a run pass.
+     * 13 on 2026-10-09 — 11 shipped by HD-303, the §6 comparison added with this class, and HD-328's
+     * four-state run against a real throwaway repository. Set EQUAL to the declared count rather
+     * than below it: the floor's only job is to notice a deletion, and leaving slack permits exactly
+     * as many silent deletions as the slack. Raise it deliberately; never lower it to make a run
+     * pass — say instead which rule stopped mattering.
      */
-    private static final int SEAL_TEST_FLOOR = 11;
+    private static final int SEAL_TEST_FLOOR = 13;
 
     /** One seal exists today. The floor is what notices the file being deleted or renamed away. */
     private static final int SEAL_FLOOR = 1;
@@ -93,9 +96,11 @@ class PipelineSealExecutionTest {
     private static final int MECHANISM_FLOOR = 2;
 
     /**
-     * A hang detector, not a budget: the seal spawns ~30 short-lived node processes and takes
-     * ~5 s here, so this is ~36x its measured cost and still finite. A bound without margin is
-     * how a suite goes red for reasons that are not about the code under test.
+     * A hang detector, not a budget: the seal spawns one short-lived node process per table row
+     * plus a handful of {@code git} invocations, and took ~8 s here on 2026-10-09 — so this leaves
+     * an order of magnitude of margin and is still finite. No count of rows is quoted: a number in
+     * a javadoc goes stale one entry before the list does, and that list grows every ticket. A
+     * bound without margin is how a suite goes red for reasons that are not about the code.
      */
     private static final int TIMEOUT_SECONDS = 180;
 

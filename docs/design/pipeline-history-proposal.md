@@ -164,6 +164,8 @@ Rule: *every exit of the hook states whether it is a finish and what it records.
 | B6 | 132 | tests gate without negative control | nothing |
 | B7 | — | `class` is not one of `feature \| light \| trivial` (HD-330) | nothing |
 | B8 | — | a judged gate value is not a verdict — a SHAPE fault (HD-330) | nothing |
+| B9 | — | `gates.tests` is `pass` but the index and the work tree disagree — staged-then-edited, unstaged, untracked or unmerged (HD-328) | nothing |
+| B10 | — | `git status --porcelain -z --no-renames -uall` did not run, so the tree could not be measured (HD-328) | nothing |
 
 The line numbers are the 2026-09-08 reading and are not maintained; the exit's **identity** is the row, and
 `check-gates.test.mjs` resolves it from the source on every run.
@@ -179,6 +181,23 @@ before its list does.
 arithmetic. The seal ends with a granularity control: every reuse row must name a site row that exists, no site
 row may carry `reuses`, and both populations carry a floor. Merging the two units back into one would silently
 change what the arithmetic measures while staying green, which is the shape that reads as coverage and is not.
+
+**B9/B10 — one tree, not one measurement (HD-328).** The suite's populations take file *names* from git and every
+reader takes *content* from disk (30 call sites across 12 classes, all through `PublishedCredentials`), so an
+index-only population is blind to a change's new files until they are staged, and a staged-but-stale blob is tested
+as its newer self. Measured on HD-314: with `deploy/` untracked, `EnvTemplateGuardTest` reported `guardedCount=8`
+and PASS; staged, 11 and FAIL. B9 refuses a `pass` tests gate from such a tree and names which paths differ **and
+in which direction**; B10 refuses when the measurement itself failed, because a missing answer must not read as
+green. The predicate is one `git status --porcelain -z --no-renames -uall`, and each flag is load-bearing — `-uall`
+most of all, since `status.showUntrackedFiles=no` in any git config hides untracked files from `--porcelain`
+entirely (measured: 5 → 0). The ticket's own prescription (`git diff --quiet` **and** `git diff --cached --quiet`
+both holding) was refused as the predicate on measurement: both exit 0 on the **clean tree only**, so it would
+refuse every real change including the correctly-staged state it exists to require, and both call a never-added
+file clean — the exact shape that produced the defect. **What B9 establishes:** a git-drawn population names the
+same files, with the same bytes, that every reader reads off disk. **What it does not:** that the recorded green
+run measured *that* tree — a file edited after the suite passed satisfies index==worktree the moment it is staged.
+Closing that needs a tree fingerprint recorded **by** the tests gate and compared here, which is a protocol change
+across agents; it is the named successor and the refusal says so rather than implying the stronger claim.
 
 `category.sealedBy: ".claude/pipeline/check-gates.test.mjs"` passed the hook only via the `existsSync` path
 fallback until HD-330; the resolver's roots were the stated list `src/test` + `src/main/frontend`, so the same

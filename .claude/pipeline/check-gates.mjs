@@ -27,6 +27,24 @@
 // name its own seal (see resolveSeal). Measured over the 123 lines of history.jsonl: the shape rule
 // newly refuses 0 runs — all 20 records carrying a prose value on a judged gate were already
 // refused, so this ticket changed messages, never verdicts.
+// 2026-10-09 (HD-328): a `pass` tests gate is refused from a tree whose INDEX and WORK TREE disagree
+// (§7b, exits B9/B10). The suite's populations take file NAMES from git (`PublishedCredentials
+// .trackedFiles` is `git ls-files --cached`; `publishableFiles` adds untracked) while every reader
+// takes CONTENT from disk — 30 call sites across 12 classes — so the two can be reading different
+// repositories. Measured on HD-314: with `deploy/` untracked, EnvTemplateGuardTest reported
+// guardedCount=8 and PASS; with the same files staged, 11 and FAIL. And a staged-but-stale blob was
+// tested as its newer self, so a commit shipped bytes no test had read.
+//   What this check establishes: a population drawn from git names the same files, with the same
+//   bytes, that every reader reads off disk.
+//   What it does NOT establish: that the recorded green run measured THIS tree. A file edited after
+//   the suite passed satisfies index==worktree the moment it is staged. Closing that needs a tree
+//   fingerprint recorded BY the tests gate and compared here — a protocol change across agents. It
+//   is the named successor, not something this check quietly implies, and the refusal says so.
+// The ticket's own prescription is refused as the predicate. Measured across four tree states:
+// `git diff --quiet` AND `git diff --cached --quiet` both exit 0 on the CLEAN TREE ONLY (a correctly
+// staged change exits 1 on the second), so "both hold" would refuse every real finish including the
+// state it exists to require; and for a file that was never added BOTH report clean, which is
+// precisely the shape that produced this defect. The honest predicate is one `git status` call.
 
 import { readFileSync, existsSync, appendFileSync, openSync, readSync, closeSync, fstatSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -41,7 +59,7 @@ const ROOT = repoRoot();
 const RUN = process.env.HAMSTRACK_RUN_JSON || `${ROOT}/.claude/pipeline/run.json`;
 // Fixture isolation (HD-303 §4.4): a run under any HAMSTRACK_* override never reaches the real history
 // unless it names its own file. `null` means "record nothing" — and say so on stderr, never silently.
-const FIXTURE = ["HAMSTRACK_RUN_JSON", "HAMSTRACK_FAKE_FILES", "HAMSTRACK_FAKE_ADDED"].some((k) => k in process.env);
+const FIXTURE = ["HAMSTRACK_RUN_JSON", "HAMSTRACK_FAKE_FILES", "HAMSTRACK_FAKE_ADDED", "HAMSTRACK_FAKE_STATUS"].some((k) => k in process.env);
 const HISTORY = "HAMSTRACK_HISTORY" in process.env ? (process.env.HAMSTRACK_HISTORY || null) : (FIXTURE ? null : `${ROOT}/.claude/pipeline/history.jsonl`);
 const OVERRIDES = Object.keys(process.env).filter((k) => k.startsWith("HAMSTRACK_")).sort();
 
@@ -91,7 +109,18 @@ const CLASSES = ["feature", "light", "trivial"];
 const cls = declared(run.class) ? (token(run.class) ?? null) : "feature";
 
 // --- 3. touched files and areas from the REAL diff (trust git, not the declaration) --------
-function sh(cmd) { try { return execSync(cmd, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); } catch { return ""; } }
+// One git invocation, two readers. `sh` is the "a failure is an empty answer" form every area/diff
+// reader here has always used; `shResult` is the same call with the failure KEPT, because §7b must
+// be able to tell "git said the tree is clean" from "git could not answer" — those are the same
+// value to `sh` and reporting them alike is the silent-disarm shape this file exists to refuse.
+function shResult(cmd) {
+  try { return { ok: true, out: execSync(cmd, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), detail: "" }; }
+  catch (e) {
+    const err = String(e.stderr ?? "").trim().split("\n")[0].slice(0, 160);
+    return { ok: false, out: "", detail: `exit ${e.status ?? "no exit code"}${err ? `, stderr \`${err}\`` : ""}` };
+  }
+}
+function sh(cmd) { return shResult(cmd).out; }
 function changedFiles() {
   if (process.env.HAMSTRACK_FAKE_FILES !== undefined) return process.env.HAMSTRACK_FAKE_FILES.split(",").map((s) => s.trim()).filter(Boolean);
   const out = new Set();
@@ -311,6 +340,85 @@ if (required.has("tests")) {
   if (typeof nc !== "string" || !/^(seen|n\/a)\s*:\s*\S/.test(nc))
     block(`gates.tests is "pass" but carries no negative control. Set gates.tests = {"status": "pass", "negativeControl": "seen: <test> red against <what was planted or reverted>"} ` +
       `(or "n/a: <reason>"). test-runner pastes the red line before the green one; a test nobody watched fail is a belief.`);
+
+  // --- 7b. X9 (HD-328): the files git NAMES and the files the readers READ are one tree ---------
+  // Reached only with gates.tests === "pass": for every non-trivial class `tests` is class-mandated,
+  // so §5 has already blocked a "pending", a "fail" and an "n/a" (measured with a light/n/a fixture:
+  // the hook refuses at B2 and never arrives here), and a trivial run finished at §4b. The explicit
+  // guard below therefore excuses nothing today — it says which state this check is about, so that a
+  // future class with an optional tests gate cannot acquire the check by accident.
+  //
+  // One `git status` call, and every flag on it is load-bearing (each measured, 2026-10-09, git 2.54.0):
+  //   -z             : without it paths are quoted and octal-escaped (`?? "unicode-\316\251.txt"`),
+  //                    and a refusal has to name a path its reader can paste.
+  //   --no-renames   : with -z a rename emits `R  <new>` followed by a SECOND NUL field `<old>`
+  //                    (`R  ren2\0del\0`), which a one-record-per-field parse reads as a path with no
+  //                    status code. With the flag every record is exactly `XY<space><path>`.
+  //   -uall          : `status.showUntrackedFiles=no` in ANY git config hides untracked files from
+  //                    --porcelain completely (5 untracked -> 0 reported). Untracked blindness is the
+  //                    exact failure this check exists for, so the flag is not cosmetic; the explicit
+  //                    flag beats the config (0 -> 5 again). It also names files rather than `dir/`.
+  //   no --ignored   : the default already leaves every ignored path out. Verified in THIS repository
+  //                    rather than assumed — the paths --ignored reports here include
+  //                    .claude/pipeline/run.json, history.jsonl and checkpoints.jsonl, .local/,
+  //                    target/, src/main/resources/static/ and .claude/settings.local.json (that
+  //                    last one via the user's GLOBAL excludes file, not this repo's .gitignore),
+  //                    and WITHOUT the flag a clean tree reports nothing at all. No count is quoted:
+  //                    it would go stale one .gitignore entry before the list does.
+  // The untracked direction is the one HD-314 shipped: with `deploy/` untracked, EnvTemplateGuardTest
+  // reported guardedCount=8 and PASS; with the same three files staged, 11 and FAIL. That history
+  // lives here and not in the refusal, which owes its reader the action and nothing else.
+  // The question is asked of the WHOLE work tree, not of the change: the hook cannot know which
+  // untracked file belongs to this task, and the stricter reading is the only honest one. An
+  // untracked file that is not part of the change has three performable answers — stage it, delete
+  // it, or ignore it. The refusal names NONE of `git stash`, `git checkout --` or `git restore`, not
+  // even to forbid them: a remedy that destroys the change does not belong in the text of a refusal
+  // whose reader is looking for a command to run, and its absence is then a check the seal can make
+  // (B9's `notReason`) instead of a sentence a later edit can quietly invert. The prohibition lives
+  // in CLAUDE.md and in Phase 7 of the feature-pipeline skill, where it is advice and not a cure.
+  if (token(gates.tests) === "pass") {
+    const faked = process.env.HAMSTRACK_FAKE_STATUS !== undefined;
+    const st = faked ? { ok: true, out: process.env.HAMSTRACK_FAKE_STATUS, detail: "" }
+                     : shResult("git status --porcelain -z --no-renames -uall");
+    if (!st.ok)
+      block(`gates.tests is "pass" but \`git status --porcelain -z --no-renames -uall\` did not run (${st.detail}), so the hook cannot tell whether the suite's populations and its readers saw one tree. ` +
+        `A measurement that failed is not a clean tree, and the one thing a missing answer must not mean is "green". ` +
+        `Finish from the checkout root (the hook looked in ${ROOT}; CLAUDE_PROJECT_DIR overrides it) or repair git, then finish again.`);
+    // Splitting on \n as well as \0 is deliberate: it lets the seal feed records without NULs, and on
+    // real output the only input it changes is a path containing a literal newline, which would be
+    // split into two unrecognisable halves and REFUSED — the safe direction for a trust check.
+    const records = st.out.split(/[\0\n]/).filter((r) => r.length >= 4);
+    const stale = [], unstaged = [], untracked = [], conflict = [];
+    for (const r of records) {
+      const x = r[0], y = r[1], path = r.slice(3);
+      const at = (bucket) => bucket.push(`${path}  [${x}${y}]`);
+      if (x === "?") untracked.push(path);
+      else if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) at(conflict);
+      else if (y !== " ") at(x === " " ? unstaged : stale);
+    }
+    const dirty = stale.length + unstaged.length + untracked.length + conflict.length;
+    if (dirty) {
+      // One budget for all four buckets, not one cap each: four capped buckets can print 40 lines
+      // and the prose budget for a refusal is 25. The count is always exact; only the listing is cut.
+      const shown = [stale, unstaged, untracked, conflict].filter((b) => b.length).length;
+      const CAP = Math.max(2, Math.floor(12 / Math.max(1, shown)));
+      const part = (head, bucket) => bucket.length
+        ? `\n  ${head}\n` + bucket.slice(0, CAP).map((p) => `    ${p}`).join("\n") +
+          (bucket.length > CAP ? `\n    … and ${bucket.length - CAP} more of these ${bucket.length}` : "")
+        : "";
+      block(`gates.tests is "pass" but the index and the work tree disagree on ${dirty} path(s) ` +
+        `(${[[stale, "staged-then-edited"], [unstaged, "unstaged"], [untracked, "untracked"], [conflict, "unmerged"]]
+            .filter(([b]) => b.length).map(([b, n]) => `${b.length} ${n}`).join(", ")}), ` +
+        `so the suite's populations (file names from git) and its readers (content from disk) were not looking at one repository.` +
+        part("staged, then edited again on disk — a commit publishes the STAGED bytes, which no reader read:", stale) +
+        part("changed on disk, never staged — invisible to every population drawn from `git ls-files --cached`:", unstaged) +
+        part("untracked — in no index population at all, so `git ls-files --cached` cannot name it:", untracked) +
+        part("unmerged — the work tree holds conflict markers, not a change:", conflict) +
+        `\nStage the whole change and finish again: \`git add -A\` (an ignored path is never reported here and never staged, so run.json and history.jsonl need nothing). ` +
+        `An untracked file that is NOT part of this change: stage it, delete it, or add it to .gitignore / .git/info/exclude. Staging is not committing — the owner commits.` +
+        `\nThis establishes that a git-drawn population names the same files, with the same bytes, that every reader reads off disk. It does not establish that the green run measured this tree.`);
+    }
+  }
 }
 
 finish("pass");

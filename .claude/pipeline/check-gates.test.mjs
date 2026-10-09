@@ -31,6 +31,23 @@ const tmp = (name) => join(TMP, `${++seq}-${name}`);
 //     one is what the granularity control at the end of the seal test fires on.
 // A1's two rows are the older instance of the same idea (a would-block Stop records `escaped`, a
 // clean one records `pass`) and keep their original `stdin`-keyed handling.
+// The four direction HEADINGS of the §7b refusal (HD-328), by name. Every row below asserts
+// presence and absence against these and never against a loose word, because the refusal's ADVICE
+// legitimately contains some of those words: "ignored paths are never staged" holds "never staged",
+// and "an untracked file that is NOT part of this change" holds "untracked". Both caught a notReason
+// of mine red — a seal keyed on a word accuses the wording of saying something it does not, and
+// would then have to be weakened until it accused nothing.
+const DIRECTION = {
+  stale: "staged, then edited again on disk",
+  unstaged: "changed on disk, never staged",
+  untracked: "untracked — in no index population",
+  unmerged: "unmerged — the work tree holds",
+};
+const rx = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every direction heading EXCEPT the ones named: what a single-direction refusal must not say. */
+const onlyDirection = (...keep) => new RegExp(Object.entries(DIRECTION)
+  .filter(([k]) => !keep.includes(k)).map(([, v]) => rx(v)).join("|"));
+
 const EXITS = [
   { id: "A1", fixture: "b2-gates-unmet.json", files: " ", stdin: { stop_hook_active: true }, exit: "finish", verdict: "escaped" },
   { id: "A1", fixture: "a4-pass.json", files: "docs/x.md", stdin: { stop_hook_active: true }, exit: "finish", verdict: "pass" },
@@ -61,6 +78,45 @@ const EXITS = [
     reason: /no valid "category" block: "members" must be a JSON array of names \(got "A, B"\)/, notReason: /"rule" must be|"sealedBy" must name/ },
   { id: "C7", reuses: "A4", fixture: "c7-tests-note-toplevel-control.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
   { id: "C8", reuses: "A4", fixture: "c8-sealedby-method.json", files: "docs/x.md", exit: "finish", verdict: "pass" },
+  // HD-328 — two new exit SITES. The run.json is `a4-pass.json` in both: the point of the check is
+  // that the SAME gate record finishes on one tree and is refused on another, so a dedicated
+  // fixture would hide the only variable. `status` is a fake `git status --porcelain -z
+  // --no-renames -uall` listing; the four directions are the four the refusal must distinguish.
+  { id: "B9", fixture: "a4-pass.json", files: "docs/x.md",
+    status: "MM a-stale\n M b-unstaged\n?? c-untracked\nUU d-conflict", exit: "block",
+    reason: /disagree on 4 path\(s\) \(1 staged-then-edited, 1 unstaged, 1 untracked, 1 unmerged\)[\s\S]*a commit publishes the STAGED bytes[\s\S]*a-stale {2}\[MM\][\s\S]*never staged[\s\S]*b-unstaged {2}\[ M\][\s\S]*untracked — in no index population[\s\S]*c-untracked[\s\S]*unmerged[\s\S]*d-conflict {2}\[UU\][\s\S]*git add -A[\s\S]*It does not establish that the green run measured this tree/,
+    // Three things this refusal must STOP saying, each of which it would be natural to write.
+    //   * a destructive remedy, EVEN AS A PROHIBITION: the first draft ended "do not reach for `git
+    //     stash` / `git checkout --` / `git restore`", which put all three command lines in front of
+    //     a reader hunting for a command to run, and made the absence check unassertable. The advice
+    //     belongs in CLAUDE.md and Phase 7 of the skill; a refusal offers the cure only.
+    //   * the predicate the ticket prescribed and measurement refuted — `git diff --quiet` AND
+    //     `git diff --cached --quiet` both hold on the CLEAN TREE ONLY, and both call a never-added
+    //     file clean. A refusal that quoted it would send its reader to a blind check.
+    //   * the overclaim. This establishes one TREE, never one MEASUREMENT.
+    notReason: /git stash|git checkout --|git restore|diff --cached --quiet|establishes that the (suite|green run|recorded run|tests gate) (measured|read)/ },
+  { id: "B10", fixture: "a4-pass.json", files: "docs/x.md", root: "notARepo", keepStatusUnset: true, exit: "block",
+    reason: /`git status --porcelain -z --no-renames -uall` did not run \(exit \d+, stderr `fatal: not a git repository[\s\S]*A measurement that failed is not a clean tree[\s\S]*Finish from the checkout root/,
+    notReason: /index and the work tree disagree|git add -A/ },
+  // HD-328 — REUSE rows. Each single direction must accuse only itself: a tree with one untracked
+  // file must not be told its edits are unstaged. And the legitimate finishing state must FINISH —
+  // a check that refuses every tree reads exactly like one that works.
+  { id: "C9", reuses: "B9", fixture: "a4-pass.json", files: "docs/x.md", status: "?? deploy/dc/.env.example\n?? deploy/dc/docker-compose.yml",
+    exit: "block", reason: /disagree on 2 path\(s\) \(2 untracked\)[\s\S]*so `git ls-files --cached` cannot name it:\n {4}deploy\/dc\/\.env\.example\n {4}deploy\/dc\/docker-compose\.yml/,
+    // Besides the other three directions: the refusal owes its reader the ACTION, so the HD-314
+    // provenance lives in the hook's comment and in §12.3 of the pipeline doc and not in the
+    // message (prose budget). Asserted absent so it cannot drift back in.
+    notReason: new RegExp(`${onlyDirection("untracked").source}|guardedCount|HD-314`) },
+  { id: "C10", reuses: "B9", fixture: "a4-pass.json", files: "docs/x.md", status: "MM deploy/dc/docker-compose.yml",
+    exit: "block", reason: /disagree on 1 path\(s\) \(1 staged-then-edited\)[\s\S]*STAGED bytes, which no reader read:\n {4}deploy\/dc\/docker-compose\.yml {2}\[MM\]/,
+    notReason: onlyDirection("stale") },
+  { id: "C11", reuses: "B9", fixture: "a4-pass.json", files: "docs/x.md", status: " M ops/deploy.sh",
+    exit: "block", reason: /disagree on 1 path\(s\) \(1 unstaged\)[\s\S]*invisible to every population drawn from `git ls-files --cached`:\n {4}ops\/deploy\.sh {2}\[ M\]/,
+    notReason: onlyDirection("unstaged") },
+  // A staged modify, a staged add, a staged delete and a staged type change: X set, Y blank. These
+  // are the four codes a fully staged change actually produces (`R` cannot appear — `--no-renames`).
+  { id: "C12", reuses: "A4", fixture: "a4-pass.json", files: "docs/x.md", status: "M  mod\nA  added\nD  gone\nT  retyped",
+    exit: "finish", verdict: "pass" },
 ];
 
 function cleanEnv() {
@@ -69,24 +125,51 @@ function cleanEnv() {
   env.CLAUDE_PROJECT_DIR = ROOT;
   return env;
 }
-function runHook({ runPath, files = "docs/x.md", added = "", stdin = {}, history, keepHistoryUnset = false }) {
+// `status` defaults to "" — a CLEAN tree — for the same reason `files` and `added` are faked: every
+// row must mean the same thing on any developer's checkout. Without the default, §7b (HD-328) would
+// read the real work tree and every `finish` row here would block while this very change was being
+// written. `keepStatusUnset` is the opt-out for the rows that must exercise REAL git.
+function runHook({ runPath, files = "docs/x.md", added = "", status = "", stdin = {}, history, root,
+                   keepHistoryUnset = false, keepStatusUnset = false }) {
   const env = cleanEnv();
   env.HAMSTRACK_RUN_JSON = runPath;
   env.HAMSTRACK_FAKE_FILES = files;
   env.HAMSTRACK_FAKE_ADDED = added;
+  if (!keepStatusUnset) env.HAMSTRACK_FAKE_STATUS = status;
+  if (root) env.CLAUDE_PROJECT_DIR = root;
   if (!keepHistoryUnset) env.HAMSTRACK_HISTORY = history;
   const t0 = process.hrtime.bigint();
   const r = spawnSync(process.execPath, [HOOK], { input: typeof stdin === "string" ? stdin : JSON.stringify(stdin), env, encoding: "utf8" });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, ms: Number(process.hrtime.bigint() - t0) / 1e6 };
 }
 const fixture = (name) => (name ? join(FIX, name) : join(TMP, "no-such-run.json"));
+// A directory that is NOT a git repository and never becomes one: the B10 input. Memoised so the
+// row and any later reader get the same path, which is the one the refusal must name.
+let NOT_A_REPO;
+function notARepo() {
+  if (!NOT_A_REPO) { NOT_A_REPO = join(TMP, "not-a-repo"); mkdirSync(NOT_A_REPO, { recursive: true }); }
+  return NOT_A_REPO;
+}
 const lines = (p) => (existsSync(p) ? readFileSync(p, "utf8").split("\n").filter((l) => l.trim()) : []);
 const records = (p) => lines(p).map((l) => JSON.parse(l));
 
+// Every row is checked and the failures are reported TOGETHER. Failing fast on the first row hid the
+// other fourteen behind it, which made each negative control of HD-328 cost one run per row and —
+// worse — would report a single regression when the whole table had gone dark.
 test("AC-1 every finishing exit appends exactly one line; every blocking exit and A2 append none", () => {
+  const broken = [];
   for (const row of EXITS) {
+    try { checkRow(row); } catch (e) { broken.push(`${row.id}: ${e.message.split("\n")[0]}`); }
+  }
+  assert.deepEqual(broken, [], `${broken.length} of ${EXITS.length} rows of the EXITS table do not hold:\n  ${broken.join("\n  ")}`);
+});
+
+function checkRow(row) {
+  {
     const history = tmp(`${row.id}.jsonl`);
-    const r = runHook({ runPath: fixture(row.fixture), files: row.files, added: row.added ?? "", stdin: row.stdin ?? {}, history });
+    const r = runHook({ runPath: fixture(row.fixture), files: row.files, added: row.added ?? "",
+      status: row.status ?? "", stdin: row.stdin ?? {}, history,
+      root: row.root === "notARepo" ? notARepo() : undefined, keepStatusUnset: Boolean(row.keepStatusUnset) });
     assert.equal(r.status, 0, `${row.id}: hook exit code`);
     const recs = records(history);
     if (row.exit === "block") {
@@ -113,7 +196,7 @@ test("AC-1 every finishing exit appends exactly one line; every blocking exit an
       }
     }
   }
-});
+}
 
 test("AC-2 once per (runHash, verdict): same run thrice -> 1 line; an edited gate -> 2; reverted -> 2", () => {
   const history = tmp("dedupe.jsonl");
@@ -197,6 +280,104 @@ test("edge lines: a foreign or torn history line neither silences the recorder n
   assert.match(cp2.out, /N3 uncovered commits: 1\/1 = 100% \[FLAG\]/, "a non-string task in an old record covers nothing and crashes nothing");
 });
 
+// HD-328. The EXITS rows above drive §7b through `HAMSTRACK_FAKE_STATUS`, which is the only way to
+// make four tree states deterministic on anybody's checkout — but a fake is also the only way to be
+// green about a `git status` invocation that does not exist. So this runs the hook against a REAL
+// throwaway repository, with the fake unset, and walks the four states in the order a change goes
+// through them. Three things only the real path can hold:
+//   * the ignored file is present in every state and must never be counted — verified against git's
+//     own ignore handling rather than against a claim that `--porcelain` omits them;
+//   * the repository sets `status.showUntrackedFiles=no`, which (measured 2026-10-09, git 2.54.0)
+//     hides untracked files from `--porcelain` entirely: 5 reported -> 0. Drop `-uall` from the
+//     hook and this test reds on the untracked state, which is the state the ticket is about;
+//   * it is the granularity control between the fake and the real input: a parser change that suits
+//     the fake and not git's actual bytes cannot stay green here.
+test("real git, four states: ignored paths never count, a fully staged change finishes, untracked and staged-but-stale are refused", () => {
+  const dir = tmp("live-repo");
+  mkdirSync(dir);
+  const git = (...args) => {
+    const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    assert.equal(r.status, 0, `git ${args.join(" ")} failed: ${r.stdout}${r.stderr}`);
+    return r.stdout;
+  };
+  git("init", "-q", ".");
+  git("config", "user.email", "seal@hamstrack.invalid");
+  git("config", "user.name", "seal");
+  git("config", "core.autocrlf", "false");
+  git("config", "status.showUntrackedFiles", "no");
+  writeFileSync(join(dir, ".gitignore"), "ignored-by-rule\n");
+  writeFileSync(join(dir, "tracked.txt"), "v1\n");
+  // State 6 renames this one. It is long and is renamed with its content UNTOUCHED because git only
+  // reports `R` above its rename-similarity threshold — measured 2026-10-09: `git mv` on a 3-byte
+  // file whose content had also changed reported `A  renamed.txt` + `D  tracked.txt` and no `R` at
+  // all, so the first draft of state 6 was green because the shape it tests never occurred.
+  writeFileSync(join(dir, "long.txt"), Array.from({ length: 40 }, (_, i) => `line ${i} of a file long enough to be seen as a rename`).join("\n") + "\n");
+  git("add", ".");
+  git("commit", "-qm", "init");
+  writeFileSync(join(dir, "ignored-by-rule"), "noise an ignore rule keeps out of every commit\n");
+
+  let state = 0;
+  const live = () => runHook({ runPath: fixture("a4-pass.json"), root: dir, keepStatusUnset: true,
+    history: tmp(`live-${++state}.jsonl`) });
+  const reason = (r) => (r.stdout ? JSON.parse(r.stdout).reason : "");
+
+  // 1. clean but for the ignored file.
+  let r = live();
+  assert.equal(r.stdout, "", `an ignored path was counted as part of the change: ${reason(r)}`);
+
+  // 2. the legitimate finishing state: the whole change staged, nothing else on disk.
+  writeFileSync(join(dir, "deploy.yml"), "image: hamstrack:1\n");
+  writeFileSync(join(dir, "tracked.txt"), "v2\n");
+  git("add", "-A");
+  r = live();
+  assert.equal(r.stdout, "", `the hook refused the state the workflow actually finishes in — stage, run the hook, commit: ${reason(r)}`);
+
+  // 3. failure shape 1: a new file never added. Invisible to `git diff --quiet`, to
+  //    `git diff --cached --quiet` and to `git diff --name-only HEAD` (all three say clean), and
+  //    invisible to `status.showUntrackedFiles=no` unless the hook passes -uall.
+  writeFileSync(join(dir, "untracked.env.example"), "SECRET=\n");
+  r = live();
+  assert.match(reason(r), /\(1 untracked\)/, "a never-added file must be refused — this is the shape that reported guardedCount=8 and PASS on HD-314 while three new files went unmeasured");
+  assert.match(reason(r), /untracked\.env\.example/);
+  assert.doesNotMatch(reason(r), /ignored-by-rule/, "the ignored file is still not part of the change");
+  assert.doesNotMatch(reason(r), onlyDirection("untracked"), "an untracked-only tree is accused of nothing else");
+  assert.equal(spawnSync("git", ["diff", "--quiet"], { cwd: dir }).status, 0, "`git diff --quiet` calls this tree clean");
+  assert.equal(spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: dir }).status, 1, "and the index differs from HEAD, so the ticket's 'both hold' would refuse this correctly-staged half too");
+  git("add", "untracked.env.example");
+
+  // 4. failure shape 2: staged, then edited again. A commit from here publishes the staged bytes.
+  //    Both are re-edited, because the staged half of the pair differs: `deploy.yml` was staged as
+  //    an ADD and reads `AM`, `tracked.txt` as a MODIFY and reads `MM`. The bucket is keyed on the
+  //    work-tree column alone, which is the only reading that catches both.
+  writeFileSync(join(dir, "deploy.yml"), "image: hamstrack:2\n");
+  writeFileSync(join(dir, "tracked.txt"), "v3\n");
+  r = live();
+  assert.match(reason(r), /\(2 staged-then-edited\)/);
+  assert.match(reason(r), /deploy\.yml {2}\[AM\]/, "a staged ADD that was then edited is staged-but-stale too");
+  assert.match(reason(r), /tracked\.txt {2}\[MM\]/);
+  assert.doesNotMatch(reason(r), new RegExp(`ignored-by-rule|untracked\\.env\\.example|${rx(DIRECTION.untracked)}`),
+    "only the stale paths are named, and only in their own direction");
+
+  // 5. staging the edit returns the tree to the finishing state.
+  git("add", "-A");
+  r = live();
+  assert.equal(r.stdout, "", `re-staging must clear the refusal, or the check has no exit: ${reason(r)}`);
+
+  // 6. a staged RENAME, which is consistent and must finish — and is why `--no-renames` is on the
+  //    command. Without it, `-z` emits `R  <new>` and then a SECOND NUL field holding `<old>`
+  //    (measured 2026-10-09, git 2.54.0: `R  ren2\0del\0`); a one-record-per-field parse reads that
+  //    stray field as a path whose first two characters are its status code, lands it in a
+  //    direction bucket and refuses a clean tree. Drop the flag and this assertion reds.
+  git("mv", "long.txt", "moved.txt");
+  // The positive control first: without an `R` record there is no stray field and the assertion
+  // below would pass whatever the hook did. This is the check that was missing from the first draft.
+  const raw = spawnSync("git", ["status", "--porcelain", "-z"], { cwd: dir, encoding: "utf8" }).stdout;
+  assert.match(raw, /(^|\0)R[ MD] moved\.txt\0long\.txt\0/,
+    `git did not detect the rename, so this state does not exercise --no-renames at all. Raw -z output: ${JSON.stringify(raw)}. Rename detection needs enough similarity — keep the renamed file long and its content untouched.`);
+  r = live();
+  assert.equal(r.stdout, "", `a staged rename is a consistent tree and must finish: ${reason(r)}`);
+});
+
 test("seal: the exits of check-gates.mjs are exactly the rows of the table above", () => {
   const src = readFileSync(HOOK, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
   const calls = (name) => (src.match(new RegExp(`(?<!function\\s)\\b${name}\\s*\\(`, "g")) || []).length;
@@ -231,9 +412,13 @@ test("seal: the exits of check-gates.mjs are exactly the rows of the table above
   assert.deepEqual(orphans.map((r) => `${r.id}->${r.reuses}`), [],
     `reuse row(s) name a site that is not in the table: ${orphans.map((r) => `${r.id} reuses ${r.reuses}`).join(", ")}. A reuse row travels through an existing exit; if that exit is gone, the row is a site row and belongs in the arithmetic.`);
   assert.equal(new Set(reuse.map((r) => r.id)).size, reuse.length, "every reuse row has its own id — two rows sharing one id hide a deleted behaviour");
-  assert.ok(sites.length >= 11, `${sites.length} site rows; the floor is 11 (A1 x2, A2, A3, A4, B1-B8 minus A1's second row) — a removed exit row is never a legal shortening`);
-  assert.ok(reuse.length >= 8,
-    `${reuse.length} reuse rows; the floor is 8. Each one is a value SHAPE the hook must accept or a refusal WORDING that was the deliverable of a ticket (HD-301's Class#method seal, HD-330's seal list, own-seal-by-name, note-bearing gates, field-named category faults). Deleting one deletes the only thing that notices the behaviour came back.`);
+  // The floors are set EQUAL to today's populations, not below them (they lagged by two until
+  // HD-328, which permitted deleting two exits in silence). A floor whose only job is to notice a
+  // deletion has no reason to leave slack: removing an exit is a deliberate edit to the row, the
+  // floor and §6 of the spec, in one change. The live counts are computed by the messages.
+  assert.ok(sites.length >= 15, `${sites.length} site rows; the floor is 15 (A1 x2, A2, A3, A4, B1-B10) — a removed exit row is never a legal shortening`);
+  assert.ok(reuse.length >= 12,
+    `${reuse.length} reuse rows; the floor is 12. Each one is a value SHAPE the hook must accept or a refusal WORDING that was the deliverable of a ticket (HD-301's Class#method seal, HD-330's seal list, own-seal-by-name, note-bearing gates, field-named category faults, HD-328's three directions and its finishing state). Deleting one deletes the only thing that notices the behaviour came back.`);
   assert.equal(EXITS.length, sites.length + reuse.length, "every row is exactly one of the two units");
 });
 
@@ -302,7 +487,13 @@ test("AC-9 documented: the procedure, the skill line and the ignore rules exist"
   assert.match(pipelineDoc, /### 12\.6 Two-week checkpoint/);
   assert.match(pipelineDoc, /node \.claude\/pipeline\/checkpoint\.mjs/);
   assert.match(pipelineDoc, /2026-09-21/);
-  assert.match(readFileSync(join(ROOT, ".claude/skills/feature-pipeline/SKILL.md"), "utf8"), /history\.jsonl/);
+  const skill = readFileSync(join(ROOT, ".claude/skills/feature-pipeline/SKILL.md"), "utf8");
+  assert.match(skill, /history\.jsonl/);
+  // HD-328: the hook refuses the unstaged state, so the one workflow that satisfies it has to be
+  // written down where the orchestrator reads it. A check nobody can satisfy is worse than none.
+  assert.match(skill, /git add -A/, "Phase 7 must name the staging step the §7b check requires");
+  assert.match(pipelineDoc, /index and work tree disagree|index and the work tree disagree|index==worktree/, "§12.3 must state the X9 rule");
+  assert.match(pipelineDoc, /guardedCount=8/, "§12.3 keeps the measurement the rule came from");
   for (const f of [".claude/pipeline/history.jsonl", ".claude/pipeline/checkpoints.jsonl"]) {
     const r = spawnSync("git", ["check-ignore", "-v", f], { cwd: ROOT, encoding: "utf8" });
     assert.equal(r.status, 0, `${f} must be ignored`);
@@ -325,7 +516,7 @@ test("the proposal's §6 exit table lists exactly the site ids of the table abov
   const next = doc.indexOf("\n## ", start + 1);
   const section = next < 0 ? doc.slice(start) : doc.slice(start, next);
   const listed = [...section.matchAll(/^\| ([AB]\d+) \|/gm)].map((m) => m[1]);
-  assert.ok(listed.length >= 12, `§6's exit table holds ${listed.length} row(s); the floor is 12 (A1-A4, B1-B8, read 2026-10-09). A scan that can pass over an empty table is not a scan — if the table really did shrink, an exit was deleted and the call-site arithmetic above is the thing to read.`);
+  assert.ok(listed.length >= 14, `§6's exit table holds ${listed.length} row(s); the floor is 14 (A1-A4, B1-B10, read 2026-10-09). A scan that can pass over an empty table is not a scan — if the table really did shrink, an exit was deleted and the call-site arithmetic above is the thing to read.`);
   const sites = [...new Set(EXITS.filter((r) => !r.reuses).map((r) => r.id))].sort();
   assert.deepEqual([...new Set(listed)].sort(), sites,
     "§6 of docs/design/pipeline-history-proposal.md and the EXITS table above state one category and disagree. Add the missing row (id, what the exit is, what it records) or delete the stale one. The doc's line-number column is declared unmaintained there and is NOT compared; the reuse rows (C*) are prose in that section, not table rows.");

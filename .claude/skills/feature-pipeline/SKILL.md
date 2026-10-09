@@ -91,7 +91,14 @@ escalate to the owner with the finding and what was tried. Reviewer conflicts re
 mandatory reviewer. Environmental test failures → fix the environment, don't bounce to a builder.
 
 ## Phase 7 — Finalize
-All required gates `pass` (or `n/a` for conditionals). Run the hook by hand — `node .claude/pipeline/check-gates.mjs </dev/null`
+All required gates `pass` (or `n/a` for conditionals). **Stage the whole change first — `git add -A` — then run the hook.**
+A `pass` tests gate is refused from a tree whose index and work tree disagree (HD-328): the suite's populations take file
+names from git and every reader takes content from disk, so an unstaged edit is invisible to the first and a never-added
+file is invisible to both (`git diff` and `git diff --cached` *both* call it clean — on HD-314 that was a green suite over
+three new files). The refusal names the paths and the direction. Ignored paths never count, so `run.json` and
+`history.jsonl` do not need staging. Staging is not committing — **the owner still commits** — and never answer a refusal
+with `git stash`, `git checkout --` or `git restore`: those destroy the change instead of making it measurable.
+Run the hook by hand — `node .claude/pipeline/check-gates.mjs </dev/null`
 — silence is the receipt and the `history.jsonl` line is the record (a session that rolls straight into the next task never
 Stops in between, so this is the only finish the checkpoint would see). Summarize what shipped, the changed
 files, the `category` block, the negative control, and any deferred items with their labels. Then two mandatory lines:
