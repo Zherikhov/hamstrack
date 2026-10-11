@@ -241,11 +241,22 @@ public final class SuiteCoverage {
      * is not rewritten and yesterday's counts are read as today's — measured 2026-09-11, mtime 30
      * seconds older than the run being read. CI has a fresh workspace and cannot hit it, which is
      * why it had to be stated rather than relied on.
+     *
+     * <p><strong>Since HD-343 it is no longer only stated.</strong> Stating it was not enough: the
+     * same trap caught a reviewer again on that ticket, where an OutOfMemoryError left this file
+     * byte-identical to the previous green run, reporting {@code complete} for a run that executed
+     * 160 tests of 2064. A {@code test-tree-summary-staleness} execution in {@code pom.xml} now
+     * deletes the file in {@code process-test-classes}, so a run that dies before the guard leaves
+     * it ABSENT instead of reassuring — and absence is the case {@code build.yml} already turns
+     * into an explicit error. This sentence is therefore the explanation of a mechanism rather than
+     * a substitute for one, and the identity line above still names its timezone because a reader
+     * comparing a UTC stamp with a local console is how the wrong conclusion got reached.
      */
     public static String summaryIdentity(String runToken, String judgedAt) {
         return summaryIdentityPrefix(runToken) + ", judged " + judgedAt
-               + ". A run id that is not this session's means the step never ran and this file is a"
-               + " leftover.";
+               + ". Both stamps are UTC (the trailing Z) while Maven's console is local, so convert"
+               + " before comparing: a run id that is not this session's means the step never ran"
+               + " and this file is a leftover.";
     }
 
     /**

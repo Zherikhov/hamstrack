@@ -97,6 +97,14 @@ JWT_SECRET=dev-only-jwt-secret-0123456789abcdef-32b \
 ./mvnw spring-boot:run
 
 # tests (needs the postgres container)
+# ~45 min for the full suite. The test JVM is capped at 2.5 GB of heap and
+# commits most of it, so close what you can spare first. That cap is sized for
+# a 16 GB machine: on a 4-8 GB one it is LOOSER than the JVM's own default of a
+# quarter of RAM, so the first thing you meet is swap — the measured live set
+# (~1.35 GB after a collection) says this suite wants 8 GB or more. Override
+# with -DargLine="-Xmx<n>m -XX:MaxMetaspaceSize=512m" (it replaces the default
+# rather than adding to it). HD-343; the numbers and what they were measured
+# against are commented in pom.xml.
 ./mvnw test
 
 # full build → single executable JAR with the frontend inside

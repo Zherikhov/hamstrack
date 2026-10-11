@@ -47,6 +47,142 @@
              `-DskipTests` leaves the build intact and drops only the executions bound to
              a testing phase (surefire's, npm-test's and npm-lint's). -->
         <frontend.skip>false</frontend.skip>
+        <!-- HD-343: THE TEST JVM'S HEAP AND METASPACE CEILING.
+
+             Surefire at all defaults runs the WHOLE suite in ONE forked JVM
+             (forkCount=1, reuseForks=true) and that JVM had no bound of any kind.
+             Measured on the box named below, 2026-10-09: ergonomic default
+             MaxHeapSize = 4127195136 (3.84 GiB, a quarter of physical RAM) and
+             MaxMetaspaceSize = 18446744073709551615, i.e. none. With Spring's
+             32-context default cache on top, one fork was permitted to hold
+             thirty-two complete application contexts inside a quarter of the
+             machine. The full suite was killed three times for low memory in one
+             session, and the day's work was therefore verified by narrow
+             `-Dtest=` runs, which DISARM the [test-tree] arm below and say
+             nothing about the rest of the tree. The container has had a bound
+             since HD-152; this is the same rule, one process over.
+
+             WHY A PROPERTY AND NOT AN <argLine> ELEMENT in the Surefire block.
+             An explicit element WINS over the -DargLine property and discards
+             it in silence: measured 2026-10-09 with an element of -Xmx1234m and
+             -DargLine="-Xmx777m" on the command line, the forked command line
+             carried 1234m and no trace of the request. The daily workaround on
+             this project WAS a command-line -DargLine, so an element here would
+             have turned a flag people type into a no-op. As a property this is a
+             DEFAULT: with nothing passed the fork gets these two flags
+             (measured), and -DargLine="..." replaces them wholesale exactly as
+             it did before this ticket (measured). It replaces rather than
+             appends, so an override that forgets the bounds restores the
+             unbounded default — which is why JvmBoundsTest reads the bounds
+             back off the RUNNING fork and reds instead of letting that be
+             silent.
+
+             THE NUMBERS, AND THE TARGET THEY ARE FOR. The tightest target that
+             must run this suite is A 16 GiB DEVELOPER LAPTOP WITH ITS NORMAL
+             DESKTOP RUNNING — not a CI runner. That is not a guess about a
+             hypothetical machine: measured on this one, mid-session, with
+             Chrome at 3442 MiB, IntelliJ at 1905 MiB, the WSL2/Docker pair at
+             ~1650 MiB and 15.37 GiB installed, FREE PHYSICAL MEMORY WAS 2.32
+             GiB. CI (ubuntu-latest, 4 vCPU / 16 GiB) has most of its RAM idle,
+             so a bound sized against CI's headroom re-files this ticket on the
+             next laptop.
+
+             -Xmx2560m, AND THE REASON IT IS NOT THE SMALLER NUMBER THIS TICKET
+             FIRST SHIPPED. 2048m was the first candidate: the heaviest subset
+             measured (114 classes, 641 tests) peaked at 1111 MiB of heap used,
+             so 2048 looked like 1.8x headroom. The full unfiltered run said
+             otherwise. At a 2048 MiB ceiling the suite DID pass — 2064 tests, 0
+             failures, all 310 classes, 45:16 — but it committed the ENTIRE
+             ceiling (2048 MiB), peaked at 1966 MiB of heap used (96% of the
+             bound), spent five pauses above 1900 MiB and logged TWO G1
+             "Evacuation Failure" collections, which is the state immediately
+             before an OutOfMemoryError. A bound that a passing run saturates is
+             a bound the next heavy test class turns red, and it would do so as
+             an OOM in whichever class happened to be allocating. At 2560m the
+             same tree runs with ZERO evacuation failures, which is the whole
+             reason for the extra 512 MiB. Do not read the subset number as the
+             requirement either: a subset fills the cache but not the heap, and
+             the gap between 1111 MiB and 1966 MiB is what that mistake costs.
+
+             BOTH FULL RUNS, because the second one corrects what the first
+             looked like it was saying. Same tree, same cache bound, same box,
+             the only difference being this number:
+
+               -Xmx      wall     peak heap used   committed   evac failures
+               2048m     45:16      1966 MiB        2048 MiB         2
+               2560m     46:41      2316 MiB        2526 MiB         0
+
+             Read that second column with care. NEITHER RUN EVER PERFORMED A
+             FULL COLLECTION, so neither figure is the live set — they are how
+             far G1 let the heap drift before a young collection, and G1 drifts
+             further when you give it room. The honest live-set reading is the
+             occupancy AFTER a collection, and that went DOWN as the ceiling
+             went up (1789 MiB at 2048m, 1349 MiB at 2560m): the tighter run
+             was not holding more, it was collecting under duress. So the
+             suite's real requirement is well under 1.5 GiB and both ceilings
+             are comfortable for it; what 2048m lost was not capacity but
+             MARGIN, which is what an evacuation failure reports.
+
+             THIS NUMBER IS ONLY VALID AT THE CACHE BOUND BESIDE IT. The
+             shipped run committed 2526 of 2560 MiB — 98.7% of the ceiling — so
+             the "zero evacuation failures" above is a margin measured WITH
+             spring.test.context.cache.maxSize=8 and nothing else. The two
+             halves were never varied independently at full scale: every
+             cache-size measurement is subset-scale, and every full-scale
+             measurement holds the cache at 8. So RAISING THE CACHE WITHOUT
+             RAISING THIS is not a small change, and neither number may be
+             re-tuned on the strength of the other's measurement.
+
+             THE COST OF THE LOOSER CEILING IS REAL AND IS THE COMMITTED
+             COLUMN: ~480 MiB more resident on the tightest target, because
+             -Xmx IS A CEILING AND NOT A RESERVATION but G1 will grow into
+             whatever it is allowed rather than collect. That is the trade
+             accepted here — half a gigabyte of a laptop's memory against a
+             bound that a passing run no longer saturates. It is also why the
+             CONTEXT CACHE and not this flag is the lever: the cache decides
+             how much is LIVE, and this flag only decides whether a breach
+             arrives as an OutOfMemoryError whose output survives or as an OS
+             kill with none.
+
+             -XX:MaxMetaspaceSize=512m. Measured peak metaspace: 140 MiB after
+             44 test classes, 163 MiB after 114, 182 MiB over the whole
+             unfiltered run of 310. The curve is flat because the frameworks
+             dominate and a further test class loads almost nothing new, so
+             512m is ~2.8x the observed peak: containment, not a dial. If this
+             one is ever breached it means a class loader is leaking, which is
+             worth being told about rather than absorbing.
+
+             NEGATIVE CONTROL, so the next reader can tell an exhausted suite
+             from a broken one. At -Xmx256m the full unfiltered run died after
+             4:57 having reported `Tests run: 160, Failures: 0, Errors: 0,
+             Skipped: 0` — FOUR ZEROS — then BUILD FAILURE with "There was an
+             error in the forked process / java.lang.OutOfMemoryError: Java heap
+             space". Four things about that shape are worth knowing in advance,
+             because each of them points away from the cause. The four zeros
+             read as a clean run to anyone scanning totals. The OOM stack names
+             whichever thread happened to be allocating — it was
+             MimeMessageHelper, so it reads as a mail bug. The application's own
+             shutdown then logs ERRORs about dead-lettered account-critical
+             mail, which are consequences and not causes. And THE [test-tree]
+             ARM BELOW SAYS NOTHING AT ALL: Surefire fails the build before the
+             antrun execution bound to the same phase is reached, so that run's
+             output contained zero occurrences of "[test-tree]" (measured). A
+             suite that ran out of memory therefore has no coverage verdict in
+             either direction — which is precisely why the bound belongs here
+             and not in a habit of passing flags by hand.
+
+             REACH, stated because the two halves of this fix do not share it
+             and a reader should not have to assume. These two flags are passed
+             by MAVEN ONLY — the same limitation the <enableAssertions> comment
+             in the Surefire block below states about -ea: an IDE builds its own
+             command line and passes neither, so a developer running one class
+             from the editor still gets the 3.84 GiB ergonomic default. The
+             other half of this ticket, the context-cache bound, lives in
+             src/test/resources/spring.properties and IS in force for every
+             runner. Held by JvmBoundsTest, which checks the declaration here,
+             the declaration for the forked <java> task further down, and the
+             bounds of the fork that is actually running. -->
+        <argLine>-Xmx2560m -XX:MaxMetaspaceSize=512m</argLine>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -672,6 +808,110 @@
                 <!-- version managed by the Spring Boot BOM (the <parent>); do NOT pin -->
                 <executions>
                     <execution>
+                        <!--
+                          HD-343. DROP LAST RUN'S SUMMARY BEFORE THIS RUN STARTS, so that the file
+                          can only ever describe the run you just watched.
+
+                          target/test-tree-summary.md is written by the guard below, which is bound
+                          to `test` and is therefore NOT REACHED when Surefire fails the build
+                          first. Measured 2026-10-09 on this ticket's own negative control: after
+                          the fork died with OutOfMemoryError, this file was BYTE-IDENTICAL to the
+                          previous green run's table, mtime unchanged, still saying
+                          `| jvm | 310 | 310 | - | complete |`. So an operator who greps it after a
+                          memory failure reads a confident `complete` about a run that executed 160
+                          tests of 2064, and the only thing distinguishing the two is a UTC run id
+                          against a local console clock. That is this ticket's whole subject - a
+                          suite that ran out of memory looking like one that passed - arriving in
+                          the one file somebody would check to rule it out.
+
+                          A delete rather than a cleverer writer because ABSENCE IS ALREADY HANDLED
+                          CORRECTLY, and better than staleness is: `.github/workflows/build.yml`
+                          already branches on the file not existing and raises
+                          `::error title=Test-tree guard did not run` plus `exit 1` with a message
+                          that separates "a suite went red before the guard ran" from "the guard was
+                          skipped". ON A REUSED WORKSPACE this step adds no behaviour, it only makes
+                          that existing branch the one that fires. In CI it changes nothing at all
+                          and is not meant to: `build.yml` checks out fresh and caches only `~/.m2`,
+                          so `target/` starts empty there and the file could never have been stale -
+                          as SuiteCoverage's own javadoc says. SO THIS IS A FIX FOR THE LOCAL AND
+                          RE-RUN-WITHOUT-CLEAN CASE, which is exactly where somebody greps the file
+                          by hand after watching a run die.
+
+                          ONE CONSEQUENCE WORTH KNOWING BEFORE IT PUZZLES YOU: this phase is not a
+                          testing phase, so `-DskipTests` does NOT reach it. A quick
+                          `package -DskipTests` therefore deletes a correct, current summary and
+                          leaves nothing. That is the intended reading rather than a wart - the file
+                          describes the last run that JUDGED the tree, and a run that skipped the
+                          suites judged nothing - but `cat target/test-tree-summary.md` coming back
+                          empty after such a build is this step and not a fault.
+
+                          `process-test-classes` is the last phase before `test`, so the file is
+                          gone before Surefire can fail. <skip>false</skip> for exactly the reason
+                          the guard below pins it: `-Dmaven.antrun.skip=true` would otherwise leave
+                          the stale file in place, which is the failure mode rather than a lesser
+                          version of it. quiet="true" because a delete of a file that is usually
+                          absent should not print a line on every build.
+                        -->
+                        <id>test-tree-summary-staleness</id>
+                        <phase>process-test-classes</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <skip>false</skip>
+                            <target>
+                                <!--
+                                  ALL THREE ARTEFACTS THE GUARD WRITES, not just the summary. The
+                                  two spill files carry NO run-identity line (the summary does), and
+                                  are rewritten only by a run that reaches the guard - so deleting
+                                  the summary alone would leave an undated "absent test classes"
+                                  list behind after a surefire OOM while removing the one file that
+                                  dated it. target/test-run-record/ is deliberately NOT here: its
+                                  filenames carry the run token and pid and the guard filters by
+                                  runId, so it identifies its own run already.
+                                -->
+                                <delete quiet="true">
+                                    <fileset dir="${project.build.directory}" includes="
+                                        test-tree-summary.md,
+                                        missing-test-classes.txt,
+                                        missing-test-files.txt"/>
+                                </delete>
+                                <!--
+                                  AND REFUSE IF ONE SURVIVED. `quiet="true"` also sets
+                                  failonerror=false (measured: ant 1.10.15 Delete.setQuiet puts 0
+                                  into failonerror, and handle() then logs at MSG_VERBOSE), and the
+                                  task prints `Deleting: <path>` BEFORE it attempts the delete - so
+                                  a failed delete produces a console line that asserts the opposite
+                                  of what happened. Measured on Windows with the file held open
+                                  (FileShare.None): `[delete] Deleting: ...` then BUILD SUCCESS,
+                                  file still present. On Windows a held handle is ordinary - an
+                                  editor, antivirus, a second Maven run - and since this step makes
+                                  ABSENCE the only signal that the tree was never judged, a silent
+                                  non-delete reinstates the exact defect the step exists to remove,
+                                  with a reassuring log line on top. So the drop path gets its
+                                  witness, and it is a refusal rather than a counter because the
+                                  build has not started testing yet and can still be stopped
+                                  cheaply.
+                                -->
+                                <!--
+                                  THE MESSAGE IS AN ATTRIBUTE AND NOT NESTED TEXT. Measured while
+                                  probing this step: with the prose in the body, Ant reported
+                                  `An Ant BuildException has occurred: condition satisfied` and
+                                  printed none of it - Fail.addText ASSIGNS the message once per
+                                  text chunk, so the trailing whitespace after </condition> became
+                                  the message and Ant fell back to its own words. A refusal that
+                                  names no action is the thing this project refuses, so the text
+                                  moved up here where the sibling <fail> below already keeps its.
+                                -->
+                                <fail message="A test-tree report from an EARLIER run could not be deleted and is still in target/, so this run cannot be told apart from that one: after a failure before the guard, those files would be read as this run's verdict, which is the staleness this step exists to prevent (HD-343). The delete cannot fail the build by itself - Ant's quiet attribute also switches failonerror off - so this refusal is the only thing that says so. WHAT TO DO: something is holding a file open. Close an editor viewing target/test-tree-summary.md, target/missing-test-classes.txt or target/missing-test-files.txt, stop any other Maven run in this directory, then re-run; if nothing obvious holds it, `mvnw clean` removes the whole directory.">
+                                    <condition><or>
+                                        <available file="${project.build.directory}/test-tree-summary.md"/>
+                                        <available file="${project.build.directory}/missing-test-classes.txt"/>
+                                        <available file="${project.build.directory}/missing-test-files.txt"/>
+                                    </or></condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                    <execution>
                         <id>test-tree-coverage-guard</id>
                         <phase>test</phase>
                         <goals><goal>run</goal></goals>
@@ -699,6 +939,20 @@
                                 <java classname="com.hamstrack.common.testsupport.SuiteCoverageGuard"
                                       fork="true" failonerror="false" logError="true"
                                       resultproperty="hamstrack.test-tree.exit">
+                                    <!-- HD-343. The third JVM this build starts, and the second
+                                         one this ticket bounded: fork="true" means a real JVM,
+                                         and it was taking the same ergonomic default as the
+                                         Surefire fork (1/4 of physical RAM, 3.84 GiB on a 15.4
+                                         GiB box). It never needed it: this program walks
+                                         src/test/java, the compiled output and `git ls-files`,
+                                         and completed its scan at -Xmx48m (measured 2026-10-09,
+                                         three runs at 48m/96m/192m, all reaching their verdict).
+                                         256m is five times the smallest value that worked, so
+                                         this is containment and not a dial anybody has to tune;
+                                         a breach here means the scan started retaining
+                                         something, which is worth hearing about. -->
+                                    <jvmarg value="-Xmx256m"/>
+                                    <jvmarg value="-XX:MaxMetaspaceSize=128m"/>
                                     <classpath>
                                         <pathelement location="${project.build.testOutputDirectory}"/>
                                     </classpath>

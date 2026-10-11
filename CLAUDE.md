@@ -95,10 +95,12 @@ Use the Maven wrapper (`mvnw.cmd` on Windows / `./mvnw` in bash).
 ```
 mvnw.cmd clean package          # build
 mvnw.cmd spring-boot:run        # run (needs DB_URL/DB_USERNAME/DB_PASSWORD)
-mvnw.cmd test                   # full test suite (needs running Postgres)
+mvnw.cmd test                   # full test suite (needs running Postgres) — ~48 min, 311 classes
 mvnw.cmd test -Dtest=HamstrackApplicationTests              # single test class
 mvnw.cmd test -Dtest=HamstrackApplicationTests#contextLoads # single test method
 ```
+
+**The test JVM is bounded from the repository since HD-343** — `pom.xml`'s `argLine` **property** (`-Xmx2560m -XX:MaxMetaspaceSize=512m`) and `src/test/resources/spring.properties` (`spring.test.context.cache.maxSize=8`); before that one fork could grow to a quarter of RAM while holding 32 application contexts, and the suite was OS-killed three times in one session. Numbers justified in both files against a 16 GB laptop with a desktop running, which is the tightest target. Three traps: `argLine` is a **property** because an `<argLine>` *element* silently discards a command-line `-DargLine` (which still overrides the property, wholesale — it replaces, never appends, so an override that forgets `-Xmx` restores the unbounded default); `spring.properties` **beats** a `-D` of the same key, so an attempted override is a red test rather than a no-op; and the heap bound reaches only Maven while the cache bound reaches every runner including an IDE. **An exhausted suite does not announce itself**: surefire dies before the coverage guard, so there is no `[test-tree]` line in either direction, and it can print `Failures: 0, Errors: 0, Skipped: 0` over whatever ran with a stack naming an innocent bystander. ⟶ test: JvmBoundsTest
 
 Frontend, from `src/main/frontend` (all three also run inside `mvnw verify` — never a bare `npx eslint .` or `tsc --noEmit`, both of which pass while checking nothing):
 

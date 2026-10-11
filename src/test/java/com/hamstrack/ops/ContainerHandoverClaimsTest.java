@@ -126,7 +126,7 @@ class ContainerHandoverClaimsTest {
      * excluded below because it names the artefact rather than configuring the JVM, and that
      * exclusion is one line of live code rather than a sentence.
      */
-    private static final Pattern JVM_FLAG = Pattern.compile("(-[^\\s\"',=]+)");
+    private static final Pattern JVM_FLAG = ContainerJvm.JVM_FLAG;
 
     /**
      * The directives that put a flag into the running JVM. {@code ENTRYPOINT} and {@code CMD} are
@@ -143,9 +143,14 @@ class ContainerHandoverClaimsTest {
      * Dockerfile's own comment already recommends {@code JAVA_TOOL_OPTIONS=-Xmx…} to an operator
      * raising the memory limit. Reading both keeps the member in the population wherever it is
      * declared, which is the property the hand-over needs.
+     *
+     * <p><strong>The list itself moved to {@link ContainerJvm} in HD-343, with the parser that reads
+     * it.</strong> That ticket added a second reader of this same {@code Dockerfile} which took only
+     * {@code ENTRYPOINT} &mdash; i.e. it reintroduced, one class over, the exact defect the
+     * paragraph above records fixing. Two readers of one file now share one parser instead of
+     * agreeing by inspection.
      */
-    private static final List<String> JVM_DIRECTIVES =
-            List.of("ENTRYPOINT", "CMD", "ENV JAVA_TOOL_OPTIONS", "ENV JDK_JAVA_OPTIONS", "ENV _JAVA_OPTIONS");
+    private static final List<String> JVM_DIRECTIVES = ContainerJvm.JVM_DIRECTIVES;
 
     /**
      * Collapse floors, not counts. Each exists for one case: a derivation that stops finding
@@ -197,7 +202,8 @@ class ContainerHandoverClaimsTest {
 
                         Every `-…` argument of those directives is a member, quoted or bare,
                         continuation lines joined. If the Dockerfile grew another way to put a flag
-                        into the JVM, add it to JVM_DIRECTIVES: a flag this scan stops seeing is still
+                        into the JVM, add it to ContainerJvm.JVM_DIRECTIVES (shared with the other
+                        reader of this file, JvmBoundsTest): a flag this scan stops seeing is still
                         in effect in the container and silently stops being demanded of the hand-over,
                         which is exactly the hole an ENTRYPOINT-only scan had.""",
                         DOCKERFILE, flags, JVM_DIRECTIVES)
@@ -630,51 +636,24 @@ class ContainerHandoverClaimsTest {
      * variable is matched <strong>anywhere in the directive</strong>, as an assignment of its own
      * name (preceded by the directive keyword or whitespace, followed by {@code =}), which is also
      * what keeps {@code JAVA_TOOL_OPTIONS_EXTRA=} from answering for it.
+     *
+     * <p>The body moved to {@link ContainerJvm#configuresTheJvm} in HD-343 so that a second reader
+     * of this {@code Dockerfile} uses this predicate rather than a narrower one of its own.
      */
     private static boolean configuresTheJvm(String directive) {
-        for (String declaration : JVM_DIRECTIVES) {
-            int space = declaration.indexOf(' ');
-            if (space < 0) {
-                if (directive.startsWith(declaration + " ") || directive.startsWith(declaration + "=")) {
-                    return true;
-                }
-                continue;
-            }
-            String keyword = declaration.substring(0, space);
-            String variable = declaration.substring(space + 1);
-            if (directive.startsWith(keyword + " ")
-                    && Pattern.compile("(?:^|\\s)" + Pattern.quote(variable) + "=")
-                            .matcher(directive.substring(keyword.length())).find()) {
-                return true;
-            }
-        }
-        return false;
+        return ContainerJvm.configuresTheJvm(directive);
     }
 
     /**
      * The Dockerfile's directives, with {@code \}-continued physical lines folded into one and
      * comments dropped. A directive spread over several lines is the ordinary way a long
      * {@code ENTRYPOINT} is written, and a line-at-a-time scan sees its tail as something else.
+     *
+     * <p>Body shared with {@link ContainerJvm#logicalLines} since HD-343, for the reason on
+     * {@link #configuresTheJvm}.
      */
     private static List<String> logicalLines(String text) {
-        var out = new ArrayList<String>();
-        var current = new StringBuilder();
-        for (String raw : text.split("\\R", -1)) {
-            String line = raw.strip();
-            if (line.startsWith("#") || (line.isEmpty() && current.isEmpty())) {
-                continue;
-            }
-            if (line.endsWith("\\")) {
-                current.append(line, 0, line.length() - 1).append(' ');
-                continue;
-            }
-            out.add(current.append(line).toString().strip());
-            current.setLength(0);
-        }
-        if (!current.isEmpty()) {
-            out.add(current.toString().strip());
-        }
-        return out;
+        return ContainerJvm.logicalLines(text);
     }
 
     /** The hand-over section: from its heading to the next {@code ## } heading. */

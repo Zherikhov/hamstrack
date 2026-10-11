@@ -44,6 +44,146 @@ import static org.assertj.core.api.Assertions.catchThrowable;
  */
 class SuiteCoverageGuardTest {
 
+    /**
+     * <strong>HD-343 &mdash; the staleness step is wired, early, unskippable, and covers every
+     * report the guard writes.</strong>
+     *
+     * <h2>Why this exists</h2>
+     * The guard is bound to {@code test} and is therefore <em>not reached</em> when Surefire fails
+     * the build first, so its reports survive from the previous run. Measured on HD-343's own
+     * negative control: after the fork died with {@code OutOfMemoryError}, {@code
+     * target/test-tree-summary.md} was byte-identical to the previous green run's table, mtime
+     * unchanged, still saying {@code | jvm | 310 | 310 | - | complete |}. The remedy is a
+     * {@code test-tree-summary-staleness} antrun execution that deletes those reports before
+     * Surefire can fail, so a run that dies early leaves them ABSENT &mdash; which is the case
+     * {@code build.yml} already turns into an explicit error.
+     *
+     * <p>That execution arrived with <strong>no seal of any kind</strong>: it appeared in exactly
+     * two places in the repository, {@code pom.xml} and one javadoc sentence. Both of its
+     * load-bearing properties are ones this project has already lost once, one execution over
+     * &mdash; the phase binding and the {@code <skip>false</skip>} pin, the latter being what stops
+     * {@code -Dmaven.antrun.skip=true} from exiting BUILD SUCCESS with nothing compared.
+     *
+     * <h2>Why here and not in {@code suiteGuard.test.ts} beside members 1-7</h2>
+     * The SPA file holds member 7 because of a <em>mutual custody</em> argument: the antrun guard
+     * keeps the vitest suite whole, so the vitest suite is made to keep the antrun guard wired, and
+     * neither can be removed in silence. That argument does not apply here &mdash; this step guards
+     * neither suite, it guards a <em>report</em>, so custody from the Surefire side has no
+     * circularity to escape: under {@code verify} this class runs, and in the one case it does not
+     * ({@code -DskipTests}) the deletion has already happened and there is no staleness to catch.
+     * Keeping it on the Java side also follows the constraint stated at
+     * {@link #keepsTheFourConstantsTheRecorderReimplementsEqualToTheJavaOnes} &mdash; cross-file
+     * comparisons live here.
+     *
+     * <p><strong>A member 8 in the SPA file would be worse than absent</strong>, and this paragraph
+     * says so because an earlier draft of it called such a member a harmless cosmetic addition. The
+     * population below is <em>derived</em> from {@link SuiteCoverageGuard#SUMMARY_FILE_NAME} and
+     * every {@link SuiteCoverage.Arm#spillFileName()}; a TypeScript member could only carry a
+     * hand-copied list of file names, i.e. a second enumeration maintained by memory, which is the
+     * exact defect class this ticket exists to remove &mdash; added in the name of symmetry.
+     *
+     * <h2>The population is derived, not listed</h2>
+     * The artefacts are read off the guard itself &mdash; {@link SuiteCoverageGuard#SUMMARY_FILE_NAME}
+     * plus every {@link SuiteCoverage.Arm#spillFileName()} &mdash; so a third arm's spill file joins
+     * this rule by existing rather than by being remembered. That is the half that would otherwise
+     * rot: HD-343 first deleted only the summary, leaving both spill files stale <em>and</em>
+     * removing the one file that carried a run identity to date them by.
+     */
+    @Test
+    void theStalenessStepDeletesEveryReportTheGuardWritesBeforeSurefireCanFail() throws IOException {
+        var pom = Files.readString(Path.of("pom.xml"), StandardCharsets.UTF_8)
+                .replaceAll("(?s)<!--.*?-->", "");
+
+        var execution = java.util.regex.Pattern
+                .compile("(?s)<execution>\\s*<id>test-tree-summary-staleness</id>.*?</execution>")
+                .matcher(pom);
+
+        assertThat(execution.find())
+                .as("""
+                    The `test-tree-summary-staleness` execution is gone from pom.xml, so the guard's
+                    reports survive a run that dies before the guard and are read as that run's
+                    verdict. Measured once already: an OutOfMemoryError left a `complete` table for
+                    a run that executed 160 tests of 2064. Restore it: maven-antrun-plugin,
+                    phase process-test-classes, <skip>false</skip>, deleting every file named by
+                    SuiteCoverageGuard.SUMMARY_FILE_NAME and SuiteCoverage.Arm#spillFileName.""")
+                .isTrue();
+        var block = execution.group();
+
+        assertThat(PHASES_BEFORE_SUREFIRE)
+                .as("""
+                    The staleness execution is not bound to a phase that runs BEFORE Surefire, so it
+                    deletes last run's reports after this run could already have failed - which is
+                    the staleness it exists to remove, merely moved later. Its phase must be one of
+                    the pre-test phases listed here. Declared block:
+                    %s""".formatted(block.strip()))
+                .anyMatch(phase -> block.contains("<phase>" + phase + "</phase>"));
+
+        assertThat(block)
+                .as("""
+                    The staleness execution no longer pins <skip>false</skip>, so
+                    -Dmaven.antrun.skip=true switches it off and the stale reports come back on
+                    exactly the invocation least likely to be looked at. The guard below pins it for
+                    the same reason, and that flag was measured exiting BUILD SUCCESS with nothing
+                    compared (HD-301 round 2).""")
+                .contains("<skip>false</skip>");
+
+        var artefacts = new TreeSet<String>();
+        artefacts.add(SuiteCoverageGuard.SUMMARY_FILE_NAME);
+        artefacts.add(fileNameOf(SuiteCoverageGuard.jvmArm(
+                Path.of("target"), Path.of("target"), "probe").spillFileName()));
+        artefacts.add(fileNameOf(SuiteCoverageGuard.vitestArm(
+                Path.of("target"), Path.of("target"), "probe", "src/main/frontend").spillFileName()));
+
+        assertThat(artefacts)
+                .as("The artefact population collapsed, so this rule had nothing to demand.")
+                .hasSizeGreaterThanOrEqualTo(3);
+
+        // THE FILESET'S includes ATTRIBUTE, NOT THE WHOLE BLOCK. Checking the block was green with
+        // a spill file deleted from the fileset, because the <fail> message beside it NAMES all
+        // three files as part of its remedy text - the check was satisfied by the refusal's own
+        // prose, which is the identical defect this ticket already fixed once in JvmBoundsTest.
+        // Caught only by planting it. The deletion is what must list the file, so that is what is
+        // read.
+        var includes = java.util.regex.Pattern
+                .compile("(?s)<fileset\\b[^>]*\\bincludes\\s*=\\s*\"([^\"]*)\"").matcher(block);
+        var deleted = new TreeSet<String>();
+        while (includes.find()) {
+            Arrays.stream(includes.group(1).split(",")).map(String::strip)
+                    .filter(entry -> !entry.isEmpty()).forEach(deleted::add);
+        }
+
+        assertThat(deleted)
+                .as("""
+                    No <fileset includes="..."> could be read out of the staleness execution, so
+                    this rule cannot see what the step actually deletes. If the deletion was
+                    rewritten in another form (a <delete file="..."> per artefact, say), teach this
+                    assertion that form - do not fall back to searching the whole execution block,
+                    which the <fail> message's remedy text satisfies on its own. Block:
+                    %s""".formatted(block.strip()))
+                .isNotEmpty();
+
+        var uncovered = artefacts.stream().filter(name -> !deleted.contains(name)).toList();
+        assertThat(uncovered)
+                .as("""
+                    A report the guard writes is NOT deleted by the staleness step, so after a run
+                    that dies before the guard it survives with last run's content. The spill files
+                    are the dangerous ones: unlike the summary they carry NO run-identity line, so a
+                    stale one is an undated list of "absent test classes" with nothing to date it
+                    by. The population is derived from the guard (SUMMARY_FILE_NAME plus every
+                    Arm#spillFileName), so add the name below to that execution's fileset.
+                    Uncovered:""")
+                .isEmpty();
+    }
+
+    /** Phases of the default lifecycle that are guaranteed to run before Surefire's {@code test}. */
+    private static final List<String> PHASES_BEFORE_SUREFIRE = List.of(
+            "generate-test-sources", "process-test-sources", "generate-test-resources",
+            "process-test-resources", "test-compile", "process-test-classes");
+
+    private static String fileNameOf(String path) {
+        return Path.of(path).getFileName().toString();
+    }
+
     private static final Path TEST_SOURCES = Path.of("src", "test", "java");
     private static final Path GUARD_SOURCE = TEST_SOURCES.resolve(
             "com/hamstrack/common/testsupport/SuiteCoverageGuard.java");
