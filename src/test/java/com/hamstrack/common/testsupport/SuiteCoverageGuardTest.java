@@ -1,5 +1,7 @@
 package com.hamstrack.common.testsupport;
 
+import com.hamstrack.ops.OpsYaml;
+
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -11,10 +13,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowable;
@@ -91,8 +95,7 @@ class SuiteCoverageGuardTest {
      */
     @Test
     void theStalenessStepDeletesEveryReportTheGuardWritesBeforeSurefireCanFail() throws IOException {
-        var pom = Files.readString(Path.of("pom.xml"), StandardCharsets.UTF_8)
-                .replaceAll("(?s)<!--.*?-->", "");
+        var pom = pomWithoutComments();
 
         var execution = java.util.regex.Pattern
                 .compile("(?s)<execution>\\s*<id>test-tree-summary-staleness</id>.*?</execution>")
@@ -173,6 +176,540 @@ class SuiteCoverageGuardTest {
                     Arm#spillFileName), so add the name below to that execution's fileset.
                     Uncovered:""")
                 .isEmpty();
+    }
+
+    /**
+     * <strong>HD-311 &mdash; an antrun step that forks a class out of {@code target} decides for
+     * itself what an absent class file means, and prints whichever answer it reaches.</strong>
+     *
+     * <h2>What went wrong</h2>
+     * {@code -Dmaven.test.skip=true} skips test <em>compilation</em>, so
+     * {@code target/test-classes} &mdash; and with it {@link SuiteCoverageGuard}'s own class file
+     * &mdash; is never produced. The {@code test-tree-coverage-guard} fork then died with
+     * {@code Could not find or load main class} at WARNING, {@code Java Result: 1} at ERROR, and a
+     * final {@code <fail>} that sent its reader to <em>"the {@code [test-tree]} report above"</em>
+     * &mdash; a report that had never been printed. Measured 2026-10-13 before the fix, on a tree
+     * with {@code target/test-classes} removed: BUILD FAILURE, exit 1. The guard's own judgement
+     * about that flag was already correct ({@code maven.test.skip} is on
+     * {@link SuiteCoverageGuard#JVM_NARROWING_SWITCHES} and arrives as an {@code <arg>}); what the
+     * flag removes is its ability to be <em>asked</em>. So the decision has to be made in Ant,
+     * where no class file is needed.
+     *
+     * <h2>Two branches, and why they must not collapse into one</h2>
+     * "The binary is absent" is a different proposition from "a narrowing flag was passed". An
+     * absence a flag explains is a stand-down and prints the disarm line; an absence nothing
+     * explains is a <em>refusal</em>, because a truncated or half-cleaned test compile removes this
+     * guard in the same stroke as the classes it was meant to notice were missing &mdash; which is
+     * this step's whole subject. A single branch on the file's existence would excuse exactly that
+     * state, and would do so silently for ever if the checked path ever went stale.
+     *
+     * <h2>The population, the unit and the control</h2>
+     * The population is <strong>every {@code maven-antrun-plugin} execution in {@code pom.xml}</strong>
+     * (two today, floored at two), keyed on its {@code <id>}; the rule is asked of every
+     * {@code (execution id, forked classname)} pair inside them, which is the unit the rule is
+     * actually about &mdash; a second fork in the same execution is a second member and cannot be
+     * satisfied by the first one's row. {@code test-tree-summary-staleness} is a member of the
+     * population and forks nothing (its one task is a {@code <delete>}, for which an absent file is
+     * the desired post-state), so it is <em>classified</em> rather than excused: grow a
+     * {@code <java>} inside it and it acquires the same three obligations here. The granularity
+     * control fires if two executions ever collapse onto one row.
+     *
+     * <p><strong>Two things this rule deliberately does not do, both reported by HD-311's tests
+     * gate, so that the next reader does not take either for an oversight.</strong> (a) The
+     * duplicate-{@code <id>} half of that control is <em>unreachable</em>: Maven's own model
+     * validation refuses the POM before any test runs
+     * ({@code '…executions.execution.id' must be unique but found duplicate execution with id
+     * test-tree-coverage-guard}), so it is a cheap backstop and not a seal — do not count it as
+     * one. (b) The two branch conditions are asserted to <em>mention</em> the presence property,
+     * not to negate it. Dropping a {@code <not>} is statically green here, and at run time under
+     * the flag it falls through to the REFUSAL and fails the build loudly: the un-asserted
+     * negation can only regress to HD-311's own defect with a better-worded message, and there is
+     * no silent-green direction to seal.
+     *
+     * <h2>Why the structural attributes and not the text</h2>
+     * Every assertion below reads an <em>attribute</em> &mdash; {@code <available file>},
+     * {@code <istrue value>}, each task's {@code if:set} &mdash; and never the block. The step's own
+     * {@code message} prose names the flag, the class file and the remedy, so a {@code contains}
+     * check over the execution block is satisfied by the refusal explaining itself with the whole
+     * mechanism deleted. That is not hypothetical here: the sibling rule above was green with a
+     * spill file dropped from the deletion, because the neighbouring {@code <fail>} message listed
+     * it. The checked path is <strong>derived from the {@code classname} attribute</strong> for the
+     * same reason a hand-copied path rots: a stale one reads "absent" for ever, which under the flag
+     * is permanent silence.
+     */
+    @Test
+    void everyAntrunForkOutOfTargetAnswersForItsOwnMissingClassFile() throws IOException {
+        var antrun = antrunPluginBlock(pomWithoutComments());
+
+        var executions = new LinkedHashMap<String, String>();
+        var declared = 0;
+        var blocks = Pattern.compile("(?s)<execution>(.*?)</execution>").matcher(antrun);
+        while (blocks.find()) {
+            declared++;
+            var block = blocks.group(1);
+            var id = Pattern.compile("<id>([^<]*)</id>").matcher(block);
+            assertThat(id.find())
+                    .as("""
+                        A maven-antrun-plugin execution in pom.xml has no <id>, so this rule cannot
+                        name the member it is judging and a second unnamed execution would collapse
+                        onto the first. Give it one. Block:
+                        %s""".formatted(block.strip()))
+                    .isTrue();
+            executions.put(id.group(1), block);
+        }
+
+        assertThat(executions.keySet())
+                .as("""
+                    The maven-antrun-plugin execution population collapsed, so this rule had nothing
+                    to demand. Both the coverage guard (test-tree-coverage-guard) and the staleness
+                    delete (test-tree-summary-staleness) are declared there; if one was deliberately
+                    removed, the sibling rules above say what it held, and this floor comes down in
+                    the SAME commit.""")
+                .hasSizeGreaterThanOrEqualTo(2);
+        assertThat(executions)
+                .as("""
+                    Two maven-antrun-plugin executions share one <id>, so %d declared blocks
+                    collapsed onto %d rows and one of them is judged by nobody. Ids must be
+                    distinct.""".formatted(declared, executions.size()))
+                .hasSize(declared);
+
+        var forks = new LinkedHashMap<String, String>();
+        var forkTags = 0;
+        for (var execution : executions.entrySet()) {
+            var tags = Pattern.compile("<java\\b[^>]*>").matcher(execution.getValue());
+            while (tags.find()) {
+                forkTags++;
+                var classname = attribute(tags.group(), "classname");
+                assertThat(classname)
+                        .as("""
+                            A <java> task in the %s execution declares no classname, so this rule
+                            cannot derive the class file whose absence it must answer for.
+                            Tag: %s""".formatted(execution.getKey(), tags.group()))
+                        .isNotNull();
+                forks.put(execution.getKey() + "#" + classname, execution.getValue());
+            }
+        }
+
+        assertThat(forks.keySet())
+                .as("""
+                    No <java> fork is declared by any maven-antrun-plugin execution in pom.xml, so
+                    this rule is vacuous. The test-tree coverage guard runs as exactly such a fork
+                    (its class file is in target/test-classes, which -Dmaven.test.skip=true
+                    removes). If that step was rewritten into another shape, teach this rule the new
+                    shape rather than letting it pass on an empty population.""")
+                .isNotEmpty();
+        assertThat(forks)
+                .as("""
+                    %d <java> forks were declared across the antrun executions but only %d rows came
+                    out, so two forks share one (execution, classname) key and one of them is
+                    answered by the other's guard. The unit of this rule is the pair.
+                    """.formatted(forkTags, forks.size()))
+                .hasSize(forkTags);
+
+        for (var fork : forks.entrySet()) {
+            var executionId = fork.getKey().substring(0, fork.getKey().indexOf('#'));
+            var classname = fork.getKey().substring(fork.getKey().indexOf('#') + 1);
+            var block = fork.getValue();
+            var classFile = classname.replace('.', '/') + ".class";
+
+            var presence = new ArrayList<String>();
+            var available = Pattern.compile("<available\\b[^>]*>").matcher(block);
+            while (available.find()) {
+                var file = attribute(available.group(), "file");
+                if (file != null && file.endsWith(classFile)) {
+                    presence.add(attribute(available.group(), "property"));
+                }
+            }
+
+            assertThat(presence)
+                    .as("""
+                        The %s execution forks %s but no <available> in it checks that class file
+                        first, so an absent one is answered by Ant's default: "Could not find or
+                        load main class" at WARNING, then a <fail> naming a report that was never
+                        printed. Measured 2026-10-13 under -Dmaven.test.skip=true, which skips test
+                        COMPILATION and therefore removes this very file. Add
+                        <available property="..." file="${project.build.testOutputDirectory}/%s"/>
+                        and gate the fork on it. The path must be DERIVED from the classname above:
+                        a hand-copied one that goes stale reads "absent" for ever, which under that
+                        flag is permanent silence.""".formatted(executionId, classname, classFile))
+                    .hasSize(1);
+            var compiled = presence.getFirst();
+
+            assertThat(attribute(tag(block, "java", classname), "if:set"))
+                    .as("""
+                        The %s execution's fork is not gated on the <available> that proves its own
+                        class file exists (property %s), so it runs anyway and dies on a
+                        ClassNotFoundException whose message belongs to Ant and not to this build.
+                        Put if:set="%s" on the <java> task (the ant:if namespace is declared on the
+                        <target>).""".formatted(executionId, compiled, compiled))
+                    .isEqualTo(compiled);
+
+            var conditions = new LinkedHashMap<String, String>();
+            var declaredConditions =
+                    Pattern.compile("(?s)<condition\\s+property=\"([^\"]*)\"\\s*>(.*?)</condition>")
+                            .matcher(block);
+            while (declaredConditions.find()) {
+                conditions.put(declaredConditions.group(1), declaredConditions.group(2));
+            }
+
+            var explained = conditions.entrySet().stream()
+                    .filter(c -> c.getValue().contains("<istrue"))
+                    .filter(c -> c.getValue().contains("<isset property=\"" + compiled + "\""))
+                    .map(Map.Entry::getKey)
+                    .toList();
+            assertThat(explained)
+                    .as("""
+                        The %s execution has no condition that reads BOTH its own missing class file
+                        (%s) and a build flag that would explain the absence, so it cannot tell a
+                        stand-down from a truncated compile and must be answering one of them
+                        wrongly. The flag branch is: <condition property="..."> <and> <not><isset
+                        property="%s"/></not> <istrue value="${maven.test.skip}"/> </and>
+                        </condition>. Reading the <fail> message's prose is not enough - it names
+                        the flag either way.""".formatted(executionId, compiled, compiled))
+                    .hasSize(1);
+
+            var flags = new TreeSet<String>();
+            var istrue = Pattern.compile("<istrue\\b[^>]*>").matcher(conditions.get(explained.getFirst()));
+            while (istrue.find()) {
+                var value = attribute(istrue.group(), "value");
+                if (value != null) {
+                    flags.add(value.replaceAll("^\\$\\{|}$", ""));
+                }
+            }
+            assertThat(flags)
+                    .as("""
+                        The flag the %s execution accepts as an explanation for its own missing
+                        class file is not one the guard itself treats as narrowing
+                        (SuiteCoverageGuard.JVM_NARROWING_SWITCHES = %s). Two lists that disagree
+                        here means the step stands down on a flag the guard would still have
+                        answered for, which is a silent unjudged suite. Accepted here: %s"""
+                            .formatted(executionId, SuiteCoverageGuard.JVM_NARROWING_SWITCHES, flags))
+                    .isNotEmpty()
+                    .allMatch(SuiteCoverageGuard.JVM_NARROWING_SWITCHES::contains);
+
+            assertThat(attribute(gatedTag(block, "echo", explained.getFirst()), "level"))
+                    .as("""
+                        The %s execution's flag branch prints nothing a default run can see: either
+                        there is no <echo if:set="%s"> or it is not at level="warning". A step that
+                        quietly does nothing is the exact shape this guard exists to delete, so the
+                        stand-down is printed one level ABOVE the guard's own INFO witness lines.
+                        (Measured 2026-10-13: Maven's -q is errors-only and hides it anyway, which
+                        is why the OTHER branch is a <fail>.)""".formatted(executionId, explained.getFirst()))
+                    .isEqualTo("warning");
+
+            var unexplained = conditions.entrySet().stream()
+                    .filter(c -> !c.getValue().contains("<istrue"))
+                    .filter(c -> c.getValue().contains("<isset property=\"" + compiled + "\""))
+                    .filter(c -> c.getValue().contains("<isset property=\"" + explained.getFirst() + "\""))
+                    .map(Map.Entry::getKey)
+                    .toList();
+            assertThat(unexplained)
+                    .as("""
+                        The %s execution has no branch for its class file being absent with NO flag
+                        to explain it, so that state is either excused or answered by Ant. It must
+                        REFUSE: a truncated or half-cleaned test compile removes this guard in the
+                        same stroke as the classes it should have missed, which is this step's whole
+                        subject. Add <condition property="..."> <and> <not><isset property="%s"/>
+                        </not> <not><isset property="%s"/></not> </and> </condition> and a <fail>
+                        gated on it.""".formatted(executionId, compiled, explained.getFirst()))
+                    .hasSize(1);
+            assertThat(gatedTag(block, "fail", unexplained.getFirst()))
+                    .as("""
+                        The %s execution computes the unexplained-absence case (%s) and then does
+                        nothing with it, which is worse than not computing it: the build passes with
+                        no check and no line. Gate a <fail> on it - a refusal survives -q, a
+                        stand-down does not.""".formatted(executionId, unexplained.getFirst()))
+                    .isNotNull();
+
+            var resultProperty = attribute(tag(block, "java", classname), "resultproperty");
+            assertThat(resultProperty)
+                    .as("""
+                        The %s fork no longer captures its exit code into a resultproperty, so
+                        nothing turns a refusal from the forked check into a build failure: it is
+                        printed and the build stays green, which is the same build as not checking
+                        at all.""".formatted(executionId))
+                    .isNotNull();
+            // LAZY, because <fail .../> is self-closing here and a greedy [^>]* eats the `/` and
+            // then matches on to the NEXT </fail> - which made this rule read the unexplained
+            // refusal and the exit-code <fail> as one element and red on the first run. Measured.
+            var elements = Pattern.compile("(?s)<fail\\b[^>]*?(?:/>|>.*?</fail>)").matcher(block);
+            var exitFails = new ArrayList<String>();
+            while (elements.find()) {
+                if (elements.group().contains("${" + resultProperty + "}")) {
+                    exitFails.add(elements.group());
+                }
+            }
+
+            // THE ELEMENT MUST EXIST BEFORE ITS PROPERTIES ARE WORTH ASKING ABOUT. Without this
+            // line the two assertions below are vacuous when no <fail> reads the exit code at all:
+            // an empty population is "no ungated fails" and "no wrong comparisons", which is the
+            // greenest possible answer to a step that no longer refuses anything. The SPA seal
+            // asks the same question from outside; this one is derived, so it also covers a second
+            // fork.
+            assertThat(exitFails)
+                    .as("""
+                        No <fail> in the %s execution reads ${%s}, so the forked check's exit code
+                        decides nothing: a refusal is PRINTED and the build stays green, which is
+                        the same build as not checking at all. Turn the captured exit code into a
+                        <fail> whose condition compares it against 0.""".formatted(
+                                executionId, resultProperty))
+                    .isNotEmpty();
+
+            var ungated = exitFails.stream()
+                    .filter(fail -> !compiled.equals(attribute(fail, "if:set")))
+                    .toList();
+            assertThat(ungated)
+                    .as("""
+                        The %s execution's exit-code <fail> is not gated on %s. When the fork does
+                        not run, resultproperty is never set, so the comparison is made against the
+                        literal `${%s}`, finds it unequal to 0 and fails the build - turning BOTH
+                        branches above into a BUILD FAILURE carrying the wrong message. Measured
+                        while HD-311 was being built. Add if:set="%s".
+                        Ungated:""".formatted(executionId, compiled, resultProperty, compiled))
+                    .isEmpty();
+
+            // AND THE COMPARISON ITSELF, AS A PAIR OF OPERANDS. Pre-existing and found by the
+            // HD-311 tests gate: arg2="${hamstrack.test-tree.exit}" makes the condition
+            // `not(x equals x)`, i.e. never true, so the refusal is UNFIREABLE - and both seals
+            // stayed green over a real armed run that then passed whatever the fork said. It is
+            // asserted here rather than as a text pattern in suiteGuard.test.ts because the
+            // operands are DERIVED on this side (resultproperty is read off the <java> tag), so a
+            // second fork gets the check for free and nothing is hand-copied; the SPA file could
+            // only pin both literals by memory, which its own javadoc gives as the reason member 8
+            // would be worse than absent. A SET of the two operands, so neither `arg1="0"
+            // arg2="0"` nor the two swapped reads as the comparison.
+            //
+            // READ FROM THE EXIT <fail>'S OWN BODY, not from the execution block (round 3). Over
+            // the block, a <condition> orphaned from any <fail> - or one belonging to a different
+            // one - satisfied this, so the assertion was wider than its own message claimed. Ant
+            // would refuse an orphaned <condition> anyway, which makes this a claim being narrowed
+            // to its check rather than a hole being closed; the check and the sentence now ask the
+            // same question, which is the part that rots when they do not.
+            var comparisons = new ArrayList<Set<String>>();
+            for (var fail : exitFails) {
+                var equals = Pattern.compile("<equals\\b[^>]*>").matcher(fail);
+                while (equals.find()) {
+                    comparisons.add(new TreeSet<>(Arrays.asList(
+                            String.valueOf(attribute(equals.group(), "arg1")),
+                            String.valueOf(attribute(equals.group(), "arg2")))));
+                }
+            }
+            assertThat(comparisons)
+                    .as("""
+                        The %s execution's exit-code <fail> no longer compares that exit code
+                        against success INSIDE ITS OWN CONDITION. It must be `${%s}` against the
+                        literal 0 and nothing else: with the SAME property on both sides it reads
+                        `not(x equals x)`,
+                        which is never true, so the refusal cannot fire at all - a green build over
+                        whatever the check printed. Found by HD-311's tests gate with both seals
+                        green over a real armed run, which is how long that shape can live. Read
+                        comparisons: %s""".formatted(executionId, resultProperty, comparisons))
+                    .contains(new TreeSet<>(List.of("${" + resultProperty + "}", "0")));
+        }
+    }
+
+    /**
+     * <strong>HD-311 &mdash; the stand-down's only witness in CI is held by something.</strong>
+     *
+     * <h2>Why this exists</h2>
+     * Branch 2 of the guard's execution lets a build PASS with nothing judged, and the argument
+     * that this is safe rests on one step somewhere else: {@code build.yml}'s
+     * "Test-tree counts in the job summary" runs {@code if: always()}, and when
+     * {@code target/test-tree-summary.md} is absent it raises
+     * {@code ::error title=Test-tree guard did not run} and exits 1. An absent summary is the ONLY
+     * signal that a run judged nothing &mdash; the guard writes that file on every path where it
+     * reached a verdict, including a disarmed one &mdash; so in CI that step is what turns "no
+     * verdict" into a red job.
+     *
+     * <p>Nothing held it. Measured on this ticket: every other mention of it in the repository was
+     * prose (a design doc and an agent checklist), and no test read the step, its {@code always()}
+     * or its {@code exit 1}. Worse, its own comment records that it <em>used to</em>
+     * {@code echo} and exit 0 &mdash; "a note in a place nobody looks" &mdash; so the silent
+     * version of this exact witness has already shipped here once. A deliberate pass-with-nothing-
+     * judged path may not point at an unheld mechanism.
+     *
+     * <h2>Read, not matched</h2>
+     * Through {@link OpsYaml}, which parses, because the comment directly above that step names
+     * the summary file AND the words {@code if: always()} &mdash; a text scan over this file is
+     * satisfied by the prose explaining the mechanism with the mechanism deleted. That is the
+     * HD-343 shape, live, in the file this rule reads. The file name comes from
+     * {@link SuiteCoverageGuard#SUMMARY_FILE_NAME} so a rename moves the rule with it.
+     */
+    @Test
+    void ciStillRefusesAJobWhoseTestTreeSummaryIsAbsent() {
+        var job = OpsYaml.map(OpsYaml.map(OpsYaml.parse(BUILD_WORKFLOW).get("jobs")).get(TEST_JOB));
+        var steps = OpsYaml.list(job.get("steps"));
+
+        assertThat(steps)
+                .as("""
+                    jobs.%s.steps could not be read out of %s at all, so this rule is asserting
+                    nothing about CI. Either the job was renamed - in which case rename TEST_JOB
+                    here in the same commit - or the workflow stopped parsing the way OpsYaml reads
+                    it.""".formatted(TEST_JOB, BUILD_WORKFLOW))
+                .isNotEmpty();
+
+        var summaryReaders = steps.stream()
+                .map(OpsYaml::map)
+                .filter(step -> String.valueOf(step.get("run"))
+                        .contains(SuiteCoverageGuard.SUMMARY_FILE_NAME))
+                .toList();
+
+        assertThat(summaryReaders)
+                .as("""
+                    No step of jobs.%s in %s reads %s any more, so CI no longer notices a run that
+                    judged NOTHING. That file's absence is the only signal there is: the guard
+                    writes it whenever it reached a verdict, disarmed included, so "no file" means
+                    "nothing compared either suite against its tree". HD-311 added a branch that
+                    passes the build with no verdict on purpose (-Dmaven.test.skip=true removes the
+                    guard's own class), and this step is the only thing standing under that
+                    decision. Restore it: `if: always()`, and on the absent branch an `::error`
+                    plus `exit 1`.""".formatted(TEST_JOB, BUILD_WORKFLOW,
+                            SuiteCoverageGuard.SUMMARY_FILE_NAME))
+                .isNotEmpty();
+
+        for (var step : summaryReaders) {
+            var name = OpsYaml.text(step.get("name"));
+            assertThat(OpsYaml.text(step.get("if")))
+                    .as("""
+                        The %s step in %s no longer runs `if: always()`, so it is skipped on exactly
+                        the jobs it matters on: a job that already failed is where the counts are
+                        needed, and a summary read only on green is read when nobody needs it. It
+                        is also then silent about a run that judged nothing while failing for an
+                        unrelated reason.""".formatted(name, BUILD_WORKFLOW))
+                    .isEqualTo("always()");
+
+            var script = String.valueOf(step.get("run"));
+            var absentBranch = script.contains("else") ? script.substring(script.indexOf("else"))
+                                                       : script;
+            assertThat(absentBranch)
+                    .as("""
+                        The %s step in %s no longer REFUSES when %s is absent - its absent branch
+                        has lost its `::error` or its `exit 1`. That is not a smaller version of
+                        the check: this step shipped once as an `echo` with exit 0, and its own
+                        comment calls that "a note in a place nobody looks". With HD-311's
+                        stand-down branch in the build, a note is all that would stand between a
+                        pass with nothing judged and a green CI run. Absent branch read:
+                        %s""".formatted(name, BUILD_WORKFLOW,
+                                SuiteCoverageGuard.SUMMARY_FILE_NAME, absentBranch.strip()))
+                    .contains("::error")
+                    .containsPattern("(?m)^\\s*exit 1\\s*$");
+        }
+    }
+
+    private static final Path BUILD_WORKFLOW = Path.of(".github", "workflows", "build.yml");
+
+    /** The job that runs the suites, and therefore the one whose summary step is load-bearing. */
+    private static final String TEST_JOB = "build-and-test";
+
+    /**
+     * <strong>HD-343's lesson, applied to this file's own reader.</strong> A scan that reads a build
+     * file expecting elements must blank its comments first: a {@code DOTALL} capture over
+     * {@code pom.xml} matched the literal {@code <argLine>} inside the comment explaining why a
+     * property was used instead of an element, so deleting the real bound left the check green. This
+     * POM's comments are long and quote the very tags, flags and file names the rules above look
+     * for, so every reader here goes through one derivation &mdash; and a shared derivation needs
+     * its own witness in BOTH directions, because consolidating trades two parsers disagreeing
+     * loudly for one parser being blind everywhere.
+     */
+    @Test
+    void blanksEveryCommentInTheBuildFileAndNothingElse() throws IOException {
+        var mustSee = Map.of(
+                "a plain element", "<id>test-tree-coverage-guard</id>",
+                "an element after a comment", "<!-- why --><skip>false</skip>",
+                "an attribute after two comments on one line",
+                "<!--a--><istrue value=\"${maven.test.skip}\"/><!--c-->");
+        for (var row : mustSee.entrySet()) {
+            assertThat(withoutXmlComments(row.getValue()))
+                    .as("""
+                        The shared POM reader lost %s, so every rule built on it now scans less
+                        than the build file declares and can pass on an element it never saw.
+                        Fixture: %s""".formatted(row.getKey(), row.getValue()))
+                    .contains(row.getValue().replaceAll("<!--.*?-->", ""));
+        }
+
+        var mustNotSee = Map.of(
+                "a one-line comment", "<!-- <skip>false</skip> -->",
+                "a multi-line comment quoting an element",
+                "<!--\n  <java classname=\"x.Y\"/> is what this step forks\n-->",
+                "a comment quoting a flag", "<!-- -Dmaven.test.skip=true removes it -->");
+        for (var row : mustNotSee.entrySet()) {
+            assertThat(withoutXmlComments(row.getValue()).strip())
+                    .as("""
+                        The shared POM reader kept %s, so a rule above can be satisfied by the
+                        prose that explains the mechanism it is supposed to find - which is how a
+                        deleted bound stayed green in HD-343. Fixture: %s""".formatted(
+                                row.getKey(), row.getValue().replace("\n", "\\n")))
+                    .isEmpty();
+        }
+
+        var raw = Files.readString(Path.of("pom.xml"), StandardCharsets.UTF_8);
+        var read = pomWithoutComments();
+        assertThat(read)
+                .as("a comment survived the real pom.xml, so the rules above are reading prose")
+                .doesNotContain("<!--");
+        assertThat(raw.length() - read.length())
+                .as("stripping comments from the real pom.xml removed almost nothing, so either the"
+                    + " file lost the notes that explain its guards or this reader stopped working"
+                    + " on the file it is pointed at")
+                .isGreaterThan(2000);
+        assertThat(read)
+                .as("the real pom.xml no longer carries the antrun executions these rules judge")
+                .contains("maven-antrun-plugin");
+    }
+
+    /** The POM as every rule here must read it: elements only, with the prose blanked. */
+    private static String pomWithoutComments() throws IOException {
+        return withoutXmlComments(Files.readString(Path.of("pom.xml"), StandardCharsets.UTF_8));
+    }
+
+    private static String withoutXmlComments(String xml) {
+        return xml.replaceAll("(?s)<!--.*?-->", "");
+    }
+
+    /** The {@code maven-antrun-plugin} {@code <plugin>} element, comments already blanked. */
+    private static String antrunPluginBlock(String pom) {
+        var plugin = Pattern
+                .compile("(?s)<plugin>(?:(?!</plugin>).)*?maven-antrun-plugin.*?</plugin>")
+                .matcher(pom);
+        assertThat(plugin.find())
+                .as("""
+                    maven-antrun-plugin is gone from pom.xml. It hosts the test-tree coverage guard
+                    (HD-265/HD-301) and the report-staleness delete (HD-343); without it an
+                    incomplete suite run is evidence again and nothing says so. Restore the plugin,
+                    or move those two steps and point these rules at wherever they went.""")
+                .isTrue();
+        return plugin.group();
+    }
+
+    /** The opening tag of the named task that declares {@code classname}, or {@code null}. */
+    private static String tag(String block, String task, String classname) {
+        var tags = Pattern.compile("<" + task + "\\b[^>]*>").matcher(block);
+        while (tags.find()) {
+            if (classname.equals(attribute(tags.group(), "classname"))) {
+                return tags.group();
+            }
+        }
+        return null;
+    }
+
+    /** The opening tag of the named task gated on {@code property} via {@code if:set}, or null. */
+    private static String gatedTag(String block, String task, String property) {
+        var tags = Pattern.compile("<" + task + "\\b[^>]*>").matcher(block);
+        while (tags.find()) {
+            if (property.equals(attribute(tags.group(), "if:set"))) {
+                return tags.group();
+            }
+        }
+        return null;
+    }
+
+    private static String attribute(String tag, String name) {
+        if (tag == null) {
+            return null;
+        }
+        var value = Pattern.compile("\\b" + Pattern.quote(name) + "\\s*=\\s*\"([^\"]*)\"")
+                .matcher(tag);
+        return value.find() ? value.group(1) : null;
     }
 
     /** Phases of the default lifecycle that are guaranteed to run before Surefire's {@code test}. */

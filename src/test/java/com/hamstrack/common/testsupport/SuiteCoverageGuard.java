@@ -138,8 +138,16 @@ public final class SuiteCoverageGuard {
      * {@code -Dgroups=…} and {@code -Dmaven.test.skip.exec=true} narrow Surefire and leave the whole
      * 45-70 s vitest suite running in full — that run is answerable for the SPA tree and this arm
      * stays armed for it. {@code -Dmaven.test.skip=true} is the same: it is not on this list because
-     * the plugin does not read it (see the note on the {@code -Dmaven.test.skip=true} edge in the
-     * POM).
+     * the plugin does not read it.
+     *
+     * <p>That last one has a consequence this list cannot express, and HD-311 settled it in the POM
+     * rather than here: the flag skips test <em>compilation</em>, so this class does not exist in
+     * such a build and the step cannot be asked anything at all. The antrun execution therefore
+     * decides it before forking — a printed stand-down when the flag explains the absent class
+     * file, a refusal when nothing does — and the stand-down line says that the SPA suite may have
+     * run unjudged (measured 2026-10-13: 75 files, 1231 tests and the lint, in full, under that
+     * flag). {@code -Dmaven.test.skip.exec=true} is the flag that skips running the tests and still
+     * leaves this check able to answer.
      */
     static final List<String> VITEST_NARROWING_SWITCHES = List.of("skipTests", "frontend.skip");
 

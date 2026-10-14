@@ -768,7 +768,8 @@
               inside a fork surfaces as "the forked VM terminated without properly saying goodbye",
               sending the reader to an unrelated question). So the two halves are split by what each
               one can do: the listener sees, this refuses. Note that the guard's own class file comes
-              off the classpath below — if the truncation ever takes THAT, this step fails too.
+              off the classpath below — if the truncation ever takes THAT, this step refuses in its
+              own voice rather than dying on a ClassNotFoundException (HD-311, the branch below).
 
               IT COSTS ONE SHORT-LIVED JVM. No JUnit, no Spring context, no database: the classpath
               is target/test-classes and the program reads two directories and one record file.
@@ -789,13 +790,51 @@
               reads it correctly. An IDE builds its own command line and never runs a Maven phase, so
               IDE runs are untouched.
 
-              KNOWN EDGE, PRE-EXISTING AND NOT INTRODUCED BY EITHER TICKET: under
-              `-Dmaven.test.skip=true` the test sources are not compiled, so target/test-classes may
-              not contain the guard at all and this fork dies with "Could not find or load main
-              class" → Java Result: 1 → the <fail> below. Measured 2026-09-11 by running that command
-              against an absent target/test-classes. It is a property of the step as it stands, filed
-              separately rather than patched here; `-DskipTests` is the flag that skips tests and
-              keeps the build honest.
+              THE ONE FLAG THAT REMOVES THIS STEP'S OWN BINARY, AND WHY THE BRANCH IS OUT HERE
+              (HD-311). `-Dmaven.test.skip=true` skips test COMPILATION as well as execution
+              (maven-compiler-plugin's testCompile binds its `skip` to exactly that property), so
+              target/test-classes — and with it the class this step forks — is never produced. The
+              guard's own judgement about the flag is already right (it is on
+              SuiteCoverageGuard.JVM_NARROWING_SWITCHES and arrives as an <arg> below); what the
+              flag takes away is its ability to be ASKED. So the decision is made here, in Ant,
+              where no class file is needed, and it is deliberately TWO decisions rather than one:
+
+                - the class is absent AND -Dmaven.test.skip=true explains it → print the disarm line
+                  and let the build pass. Measured 2026-10-13: without this branch that invocation
+                  ended in BUILD FAILURE whose last line sent the reader to a `[test-tree]` report
+                  that had never been printed, the only other output being "Could not find or load
+                  main class" at WARNING.
+                - the class is absent for any OTHER reason → REFUSE. "The binary is missing" is not
+                  the same proposition as "a narrowing flag was passed": a truncated or half-cleaned
+                  test compile removes the guard in the same stroke as the classes it should have
+                  missed, which is this step's whole subject, so a flagless absence must not be
+                  excused. A guard in doubt asks for its bound.
+
+              `-Dmaven.test.skip.exec=true` is the sibling flag and the recommended remedy: it skips
+              RUNNING the tests and still compiles them, so this step runs and stands its own arms
+              down. Measured 2026-10-13, 30 s end to end: "Compiling 342 source files … to
+              target\test-classes", then `[test-tree] coverage check disarmed by
+              -Dmaven.test.skip.exec=true`, BUILD SUCCESS, summary table written. The two flags
+              therefore have one coherent story — one is answered by the guard, the other by this
+              condition, and both say which flag stood what down.
+
+              THE FRONTEND ASYMMETRY IS LEFT AS IT IS, DELIBERATELY. frontend-maven-plugin reads
+              skipTests and nothing else, so `-Dmaven.test.skip=true` alone still runs the whole SPA
+              suite and lint: measured 2026-10-13, 168 s, "236 files linted", "Test Files 75 passed
+              (75)", "Tests 1231 passed (1231)" — and then this step cannot judge any of it. Making
+              that symmetric would mean teaching this plugin's executions a second skip property and
+              editing the guard's VITEST_NARROWING_SWITCHES to match, i.e. changing WHICH SUITES RUN
+              on a usability ticket; and the asymmetry is load-bearing documentation elsewhere
+              (CLAUDE.md, SuiteCoverageGuard's javadoc). So the exposure is NAMED instead: the
+              disarm line below says the SPA suite may have run unjudged in this build, and
+              target/test-tree-summary.md is absent, which is how HD-343 spells "nothing judged this
+              tree". CI is untouched — `.github/workflows/build.yml` runs `./mvnw -B verify` with no
+              skip flag, and a workflow that added this one would be skipping the backend suite
+              outright, which no output from this step could disguise. It also could not pass
+              quietly there: that workflow's "Test-tree counts in the job summary" step already
+              turns an ABSENT target/test-tree-summary.md into `::error title=Test-tree guard did
+              not run` plus exit 1 (read, build.yml), which is exactly the state this disarm leaves
+              behind. So the stand-down is local-only by construction.
 
               ORDERING: within the `test` phase the default lifecycle binding (surefire:test) runs
               before POM-declared executions, so the record is complete by the time this reads it —
@@ -930,13 +969,112 @@
                                  Asserted from the other side by
                                  src/main/frontend/src/lint/suiteGuard.test.ts. -->
                             <skip>false</skip>
-                            <target>
+                            <target xmlns:if="ant:if">
+                                <!--
+                                  HD-311. IS THIS STEP'S OWN BINARY THERE, AND IF NOT, DOES A FLAG
+                                  EXPLAIN IT? Three outcomes, each of them PRINTED; the long note
+                                  above this plugin says why the branch is here and not in the
+                                  guard (the flag removes the guard's class, so its own correct
+                                  judgement can never be reached).
+
+                                  The checked path is DERIVED FROM THE CLASSNAME BELOW and must
+                                  stay equal to it: a stale path here reads as "absent" for ever,
+                                  which under the flag is permanent silence — the dangerous
+                                  direction. SuiteCoverageGuardTest#everyAntrunExecutionThatForks…
+                                  recomputes it from <java classname=…> and reds the build if the
+                                  two drift.
+
+                                  THE STATE THAT WILL MAKE YOU THINK A CHANGE HERE DID NOT TAKE, and
+                                  it has now cost two people an hour: class PRESENT *and*
+                                  -Dmaven.test.skip=true. That is branch 1 — the fork runs, the
+                                  guard disarms ITSELF on the flag, the summary is written — and it
+                                  is the ORDINARY case on a dev box that does not `clean`, because
+                                  the flag declines to recompile the test sources but does not
+                                  remove what an earlier build already compiled. Both answers are
+                                  honest and the echo below stays true (it only ever prints when
+                                  the file is genuinely absent), so this is a reproduction hazard
+                                  and not a defect: PROBE BRANCH 2 WITH target/test-classes
+                                  REMOVED, or you will watch branch 1 and conclude the condition
+                                  is dead. CI never sees it — always a clean checkout.
+
+                                  <istrue> on an unpassed property is FALSE, not an error: Maven
+                                  leaves an undefined ${…} as its own placeholder (the same
+                                  mechanism the <arg>s below rely on) and Ant's Project.toBoolean
+                                  reads only on/true/yes as true. So "not passed" and "passed
+                                  false" both land in the refusing branch, where the class being
+                                  absent is unexplained — which is the safe side.
+                                -->
+                                <available property="hamstrack.test-tree.guard-compiled"
+                                           file="${project.build.testOutputDirectory}/com/hamstrack/common/testsupport/SuiteCoverageGuard.class"/>
+                                <condition property="hamstrack.test-tree.absence-explained">
+                                    <and>
+                                        <not><isset property="hamstrack.test-tree.guard-compiled"/></not>
+                                        <istrue value="${maven.test.skip}"/>
+                                    </and>
+                                </condition>
+                                <condition property="hamstrack.test-tree.absence-unexplained">
+                                    <and>
+                                        <not><isset property="hamstrack.test-tree.guard-compiled"/></not>
+                                        <not><isset property="hamstrack.test-tree.absence-explained"/></not>
+                                    </and>
+                                </condition>
+                                <!--
+                                  level="warning", one level ABOVE the guard's own witness lines,
+                                  because in this branch the echo is the step's ENTIRE output and a
+                                  disarm nobody sees is indistinguishable from a step that quietly
+                                  did nothing — the shape this whole step exists to delete. Default
+                                  and `-B` runs print it: measured 2026-10-13, `[WARNING] [echo]
+                                  [test-tree] coverage check disarmed by -Dmaven.test.skip=true …`.
+
+                                  WHAT WARNING DOES NOT BUY, measured on the same day rather than
+                                  assumed (the first draft of this comment claimed the opposite):
+                                  `-q` is "errors only" in Maven, so the disarm line is NOT printed
+                                  under it — that invocation ends BUILD SUCCESS with no output from
+                                  this plugin at all. The CONSOLE half of that is a property of
+                                  `-q` and not of this branch: under `-q` a normal armed run prints
+                                  nothing here either — not the [test-tree] line, not the
+                                  [vitest-tree] line, not the counts (measured, 0 bytes both ways).
+
+                                  BUT THE EVIDENCE HALF IS NOT SYMMETRIC, and this is the honest
+                                  version of a sentence that first shipped claiming it was.
+                                  Measured under `-q`, the only difference being whether the
+                                  guard's class file exists: class present (so the guard disarms
+                                  ITSELF on the flag) leaves target/test-tree-summary.md WRITTEN,
+                                  477 bytes, dated, both rows `disarmed`; this branch leaves no
+                                  artefact anywhere on the machine. So `-q` hides every printed
+                                  verdict, and this branch additionally leaves nothing to read
+                                  afterwards. The one action a `-q` user has is to re-run without
+                                  it, which is why the stand-down's remedy list below names the
+                                  file.
+
+                                  DO NOT "FIX" THAT BY WRITING A SUMMARY HERE. It is the tempting
+                                  repair and it would break the chain this branch depends on:
+                                  build.yml's summary step branches on that file's ABSENCE to raise
+                                  `::error title=Test-tree guard did not run` and exit 1, so a
+                                  stand-down that left a file would hand CI something to `cat` and
+                                  silence the one refusal standing under this decision (sealed by
+                                  SuiteCoverageGuardTest#ciStillRefusesAJobWhoseTestTreeSummaryIsAbsent).
+                                  An absent summary MEANS nothing judged the tree; a summary saying
+                                  "nothing judged the tree" is a verdict, and this branch has none.
+
+                                  The alternative for the console is worse too: an echo at
+                                  level="error" would print `[ERROR]` for a build that passed, which
+                                  every log scraper and every reader would take for a failure. The
+                                  REFUSAL below is a <fail> and therefore survives `-q` (measured:
+                                  its whole text, under -q, exit 1), which is the right split —
+                                  silence you asked for can hide a stand-down, never a refusal.
+                                -->
+                                <echo if:set="hamstrack.test-tree.absence-explained" level="warning"
+                                      message="[test-tree] coverage check disarmed by -Dmaven.test.skip=true: that flag skips test COMPILATION as well as execution, so this step's own class (com.hamstrack.common.testsupport.SuiteCoverageGuard, in target/test-classes) was never built in this invocation and the check could not be asked anything. Nothing judged either tree and no summary was written -- an absent target/test-tree-summary.md is how a run that judged nothing reads (HD-343). Worth knowing before you trust this build: the backend arm would have stood down for this flag anyway, but the SPA arm would NOT have, because frontend-maven-plugin reads skipTests and nothing else -- so unless -Dfrontend.skip=true was also passed, the vitest suite and the lint ran in full here and went unjudged. TO SKIP RUNNING THE TESTS AND STILL BE JUDGED: -Dmaven.test.skip.exec=true skips execution but still compiles, so this check runs and stands its arms down itself; -DskipTests stands both arms down the same way. Either of those also leaves a dated target/test-tree-summary.md behind, while this branch leaves no artefact at all -- so a run you may need a record of should not be this one, and should not be run under -q, which hides this line. HD-311."/>
+                                <fail if:set="hamstrack.test-tree.absence-unexplained"
+                                      message="The test-tree coverage check could not run, because its OWN compiled class is missing: ${project.build.testOutputDirectory}/com/hamstrack/common/testsupport/SuiteCoverageGuard.class is not there, and nothing in this invocation explains that -- -Dmaven.test.skip=true is the only flag in this build that skips test COMPILATION, and it was not passed (note that -Dmaven.test.skip.exec=true and -DskipTests both still compile the tests, so neither can be the cause). An unexplained missing test class is the state this check exists to catch and not a reason to excuse it: a truncated or half-cleaned test compile removes this guard in the same stroke as the classes it was supposed to notice were absent, so this refuses rather than disarms, and nothing about either suite was compared. WHAT TO DO: run `mvnw test-compile` -- or `mvnw clean test` if target/ is in an unknown state -- so target/test-classes is rebuilt, then re-run. If you did mean to skip the tests, -DskipTests keeps the class and lets this check stand itself down, and -Dmaven.test.skip=true is accepted here as an explicit disarm with a printed line. HD-311."/>
                                 <!-- failonerror would end the build with "Java returned: 1", which
                                      names neither the check nor where its report went; the exit
                                      code is captured and turned into a <fail> whose message is the
                                      one line Maven prints last. The report itself is the program's
                                      stderr, a few lines above. -->
-                                <java classname="com.hamstrack.common.testsupport.SuiteCoverageGuard"
+                                <java if:set="hamstrack.test-tree.guard-compiled"
+                                      classname="com.hamstrack.common.testsupport.SuiteCoverageGuard"
                                       fork="true" failonerror="false" logError="true"
                                       resultproperty="hamstrack.test-tree.exit">
                                     <!-- HD-343. The third JVM this build starts, and the second
@@ -978,7 +1116,24 @@
                                          keep when adding a switch here. -->
                                     <arg value="frontend.skip=${frontend.skip}"/>
                                 </java>
-                                <fail message="A suite in this run cannot be shown to have executed the whole tree it is answerable for, so its result is not evidence about whatever it left out. The [test-tree] (backend) and [vitest-tree] (SPA) report above says which, and what is missing; HD-265, HD-301.">
+                                <!--
+                                  HD-311. `if:set` on this one too, and it is not cosmetic: when
+                                  the fork above does not run, `resultproperty` is never set, the
+                                  <equals> below compares the literal `${hamstrack.test-tree.exit}`
+                                  against `0`, finds them unequal and fails the build — turning
+                                  either branch above into a BUILD FAILURE with the wrong message
+                                  attached. Measured while building this branch.
+
+                                  The message's second sentence is HD-311's other half: on the
+                                  missing-class path it used to send its reader to a `[test-tree]`
+                                  report that had never been printed, and a refusal may only
+                                  prescribe what its reader can actually do. That path is now
+                                  answered above, but a fork can still die before its own verdict
+                                  (a heap or metaspace breach does), so the message says what to
+                                  read when there is no report.
+                                -->
+                                <fail if:set="hamstrack.test-tree.guard-compiled"
+                                      message="A suite in this run cannot be shown to have executed the whole tree it is answerable for, so its result is not evidence about whatever it left out. The [test-tree] (backend) and [vitest-tree] (SPA) report above says which, and what is missing; HD-265, HD-301. If there is NO such report above, the forked check died before reaching any verdict and compared nothing: its last lines, printed just above `[java] Java Result:`, are then the whole diagnostic -- a breach of the -Xmx256m or -XX:MaxMetaspaceSize=128m bound set on it here prints there. HD-311.">
                                     <condition>
                                         <not><equals arg1="${hamstrack.test-tree.exit}" arg2="0"/></not>
                                     </condition>

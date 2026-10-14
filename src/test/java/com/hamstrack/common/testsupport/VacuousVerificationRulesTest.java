@@ -19,14 +19,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * <strong>HD-295 — vacuous verification cannot be typed by habit.</strong>
  *
- * <p>Three guards that pass while checking nothing have shipped here: 1258 bare
- * {@code assert}s inert under any IDE (no {@code -ea}; HD-164), a type-check pointed at a
- * solution-style {@code tsconfig.json} where it checks zero files — while being the first
- * command an agent was told to run — and a skipped test reading as a pass in a summary line.
- * The HD-265 suite-coverage guard cannot see the third: it counts a class-level skip as
- * present. This class refuses all three over the whole corpus, not over the members that
- * happen to carry one today (there are none — see the positive control, which is why the
- * fixtures exist).
+ * <p>A guard that passes while checking nothing has shipped here repeatedly, and this class
+ * holds one rule per shape it has shipped in — deliberately phrased that way rather than with a
+ * leading count, because a count goes stale one entry before the list does, and this list has
+ * grown once since it was written. The shapes so far: 1258 bare {@code assert}s inert under any
+ * IDE (no {@code -ea}; HD-164); a type-check pointed at a solution-style {@code tsconfig.json}
+ * where it checks zero files, while being the first command an agent was told to run; a skipped
+ * test reading as a pass in a summary line, which the HD-265 suite-coverage guard cannot see
+ * because it counts a class-level skip as present; and (HD-311) a failure message whose
+ * {@code .formatted} binds to the tail of a concatenation, so the refusal prints {@code %s} where
+ * the member's name should be — the one shape that hides in the refusal rather than in the check.
+ * Each is refused over the whole corpus, not over the members that happen to carry one today
+ * (there are none — see the positive control, which is why the fixtures exist).
  *
  * <p><strong>The populations and their floors</strong> — P1, every backend test source
  * (floor 250); P2, every frontend test source, defined to equal vitest's own {@code include}
@@ -47,10 +51,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><strong>What proves the wiring, as opposed to the predicate.</strong> A fixture cannot
  * show that the populations, the stripping and the line numbers agree on real files. That is
- * AC-4: the four markers were planted one at a time in real members — a bare skip annotation
- * in a P1 test, a bare {@code assert} in another, a skipped case in a P2 file, and a
- * {@code --noEmit} type-check in P3 — each watched red, each reverted, and the class watched
- * green afterwards. The red lines are in the ticket.
+ * AC-4: every marker was planted one at a time in real members — a bare skip annotation
+ * in a P1 test, a bare {@code assert} in another, a skipped case in a P2 file, a
+ * {@code --noEmit} type-check in P3, and (HD-311) a concatenated {@code .formatted} message in a
+ * P1 test, reported at {@code SuiteCoverageGuardTest.java:312} — each watched red, each reverted,
+ * and the class watched green afterwards. The red lines are in the tickets.
  *
  * <p>This class stays authoritative for R2 after HD-297: the ArchUnit rule set in
  * {@code ArchitectureRulesTest} imports production bytecode only ({@code DoNotIncludeTests}),
@@ -76,9 +81,9 @@ class VacuousVerificationRulesTest {
     private static final int BACKEND_FLOOR = 250;
     private static final int FRONTEND_FLOOR = 50;
     private static final int SCRIPT_FLOOR = 6;
-    private static final int FIXTURE_FLOOR = 3;
-    private static final int REPORT_SENTINEL_FLOOR = 18;
-    private static final int CLEAN_SENTINEL_FLOOR = 26;
+    private static final int FIXTURE_FLOOR = 4;
+    private static final int REPORT_SENTINEL_FLOOR = 22;
+    private static final int CLEAN_SENTINEL_FLOOR = 36;
 
     private static final Path PACKAGE_JSON = Path.of("src", "main", "frontend", "package.json");
     private static final Path VITEST_CONFIG = Path.of("src", "main", "frontend", "vitest.config.ts");
@@ -115,6 +120,15 @@ class VacuousVerificationRulesTest {
     private static final String ASSERT_REMEDY = """
             Use assertThat(...): a bare `assert` runs only under -ea, which Surefire passes and
             no IDE does, so the check is inert for whoever is actually debugging it (HD-164).""";
+
+    private static final String FORMATTED_REMEDY = """
+            `formatted` is an instance method on the LAST literal, not on the concatenation, so
+            every placeholder in an earlier fragment stays a literal `%s` in the printed failure
+            and the surplus argument is dropped without a word — nothing throws, javac says
+            nothing, and the text is only ever read by somebody whose build just went red. Make
+            the message ONE literal (a text block, like its neighbours) or parenthesise the
+            concatenation; `.as("… %s …", arg)` is AssertJ's own overload and is immune by
+            construction. Measured on HD-311, which shipped three of them (HD-311).""";
 
     // ------------------------------------------------------------------ R1, over P1 and P2
 
@@ -186,6 +200,32 @@ class VacuousVerificationRulesTest {
                 .isEmpty();
     }
 
+    // ------------------------------------------------------------------------- R4, over P1
+
+    /**
+     * The fourth way a verification verifies nothing, and the only one of the four that hides in
+     * the <em>refusal</em> rather than in the check: a failure message that cannot name the
+     * member it is about. It joins this class rather than living beside the rule that produced it
+     * because the claim is about every backend test source, not about the one that was caught —
+     * HD-311 shipped three instances in a single method whose other fourteen messages were
+     * correct, so authoring care is demonstrably not the mechanism.
+     */
+    @Test
+    void noBackendTestBindsFormattedToTheTailOfAConcatenation() {
+        var files = backendTestSources();
+        var offences = new ArrayList<Offence>();
+        for (Path file : files) {
+            offences.addAll(VacuousVerification.formattedOnATailFragment(
+                    PublishedCredentials.repositoryPath(file), read(file)));
+        }
+        assertThat(offences)
+                .as("%s", VacuousVerification.report(
+                        "A backend test's failure message formats only its last fragment, so the"
+                        + " placeholders before it print as `%s`:",
+                        offences, FORMATTED_REMEDY))
+                .isEmpty();
+    }
+
     // ------------------------------------------------------------------------- R3, over P3
 
     @Test
@@ -253,6 +293,7 @@ class VacuousVerificationRulesTest {
                     path, source, java ? Language.JAVA : Language.TYPESCRIPT));
             if (java) {
                 offences.addAll(VacuousVerification.bareAsserts(path, source));
+                offences.addAll(VacuousVerification.formattedOnATailFragment(path, source));
             }
             offences.stream().map(o -> path + ":" + o.line()).distinct().forEach(reported::add);
 

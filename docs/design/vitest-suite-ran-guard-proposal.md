@@ -397,6 +397,16 @@ exit non-zero → `<fail>`. That is a property of the step as it stands today, n
 **probes it** (`mvnw.cmd clean test -Dmaven.test.skip=true` on a clean `target/`) and, if it reproduces, files it as
 its own ticket rather than smuggling a fix in here; this ticket's only obligation is not to make it worse.
 
+> **Resolved by HD-311 (2026-10-13).** It reproduced exactly as written — BUILD FAILURE whose last line sent the
+> reader to a `[test-tree]` report that had never been printed. The antrun step now decides it before forking, in
+> two branches: the class file absent *and* `-Dmaven.test.skip=true` true → a printed stand-down at
+> `level="warning"` naming the flag, what it skipped and that the SPA suite may have run unjudged (measured: it
+> does — 75 files, 1231 tests, plus the lint, 168 s, under that flag alone); the class file absent for any other
+> reason → a refusal, because a truncated test compile removes the guard in the same stroke as the classes it
+> should have missed. `-Dmaven.test.skip.exec=true` needed no change: it compiles, so the step runs and stands its
+> own arms down (measured, 30 s, BUILD SUCCESS, summary written). Sealed by
+> `SuiteCoverageGuardTest#everyAntrunForkOutOfTargetAnswersForItsOwnMissingClassFile`.
+
 ### 6.4 Edge cases
 - **Interrupted run** (`reason: 'interrupted'`, Ctrl-C, worker crash): per-module appends mean the record is short →
   incomplete-run refusal naming the modules not reached. The run is red anyway; the guard says *how far it got*.
@@ -692,7 +702,8 @@ Before any code, measure these and report **measured / read / inferred** on each
 4. **M-1 — the real counts.** `Test Files … / Tests …` from one full run, dated. P4's 1218 is unverified; the
    test-count floor is derived from **your** number, not from this document's.
 5. **I-3 — the `-Dmaven.test.skip=true` edge** (§6.3). Probe on a clean `target/`. If the antrun step already breaks
-   there, file it, do not fix it here.
+   there, file it, do not fix it here. *Done: it broke, it was filed as HD-311, and HD-311 fixed it — see the
+   resolution note in §6.3.*
 6. **R-2 — `SuiteCoverage` must not be named into Surefire's four include patterns**, and neither may any new helper;
    `suiteRecorder.ts` must not match `*.{test,spec}.{ts,tsx}` or it becomes a member of its own bound.
 

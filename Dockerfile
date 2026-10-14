@@ -16,6 +16,18 @@ RUN sed -i 's/\r$//' mvnw && chmod +x mvnw
 RUN ./mvnw dependency:go-offline -B
 
 # Now copy source, stamp the version, and build
+#
+# THE TEST SOURCES MUST KEEP ARRIVING IN THIS CONTEXT (HD-311). `-DskipTests` below skips
+# RUNNING the tests and still compiles them, which is what keeps target/test-classes - and
+# with it the test-tree coverage guard's own class - present, so the guard's antrun step takes
+# its ordinary branch and judges this build. There is no .dockerignore in this repository, so
+# src/test arrives today by default. The two shortcuts that look free here are not: excluding
+# src/test would make the guard refuse with a remedy (`mvnw test-compile`) that nobody can
+# perform inside a layer, and switching this line to `-Dmaven.test.skip=true` would take the
+# guard's stand-down branch, shipping an image whose SPA suite ran unjudged with no summary
+# artefact to notice it by - and `build-and-push` has no summary step, so CI's absent-summary
+# refusal would not catch it either. If the build-perf work needs that saving, change the
+# guard's condition deliberately in the same commit; do not discover it from a red image build.
 COPY src/ src/
 RUN ./mvnw -B versions:set -DnewVersion="${APP_VERSION}" -DgenerateBackupPoms=false \
  && ./mvnw clean package -DskipTests -B

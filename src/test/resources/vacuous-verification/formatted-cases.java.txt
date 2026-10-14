@@ -1,0 +1,77 @@
+// R4 fixture, backend side. Not a test and not compiled — outside src/test/java by directory
+// AND by extension (HD-295 §5). Sentinels as in the sibling fixtures.
+//
+// R4 is `String.formatted` bound to the LAST fragment of a `+` concatenation, so a placeholder
+// in an earlier fragment is never substituted and the surplus argument is ignored in silence.
+// HD-311 shipped three of these; one printed `the shared POM reader kept %s, so a rule above …`
+// to the one reader who needed the name.
+class FormattedCases {
+
+    void messages(String member, int count) {
+        assertThat(x)
+                .as("the %s fork no longer captures its exit code, so nothing turns a refusal"
+                    + " from the forked check into a build failure".formatted(member))   // EXPECT-REPORT: the %s is in the head fragment and never substituted
+                .isNotNull();
+
+        assertThat(x)
+                .as("counted %d members"
+                    + " in the population".formatted(count))                            // EXPECT-REPORT: same shape, one line per operand
+                .isNotNull();
+
+        assertThat(x)
+                .as("the member is "
+                        +
+                        "%s".formatted(member))                                          // EXPECT-REPORT: the + and the fragment on different lines
+                .isNotNull();
+
+        assertThat(x)
+                .as("a trailing text block names %s"
+                    + """
+                      and this fragment is the only one formatted""".formatted(member))  // EXPECT-REPORT: a text block is a tail fragment too
+                .isNotNull();
+
+        assertThat(x)
+                .as(("the %s fork no longer captures its exit code, so nothing turns a refusal"
+                     + " from the forked check into a build failure").formatted(member))  // EXPECT-CLEAN: parenthesised, so formatted sees the whole message
+                .isNotNull();
+
+        assertThat(x)
+                .as("""
+                    The %s fork no longer captures its exit code, so nothing turns a refusal
+                    from the forked check into a build failure.""".formatted(member))     // EXPECT-CLEAN: one literal, which is why the other 14 messages in that method are correct
+                .isNotNull();
+
+        assertThat(x)
+                .as("%s", report(member, count));                                         // EXPECT-CLEAN: AssertJ's varargs overload, immune by construction
+        assertThat(x)
+                .as("the %s fork".formatted(member) + " no longer captures its exit code");// EXPECT-CLEAN: formatted on the HEAD fragment, which is substituted
+        assertThat(x)
+                .as(headline + describe(member).formatted(count));                        // EXPECT-CLEAN: the receiver is a call, not a concatenated literal
+        assertThat(x)
+                .as(headline + " and " + member);                                         // EXPECT-CLEAN: a concatenation with no formatting at all
+        // .as("prose" + " in a comment".formatted(member))                               // EXPECT-CLEAN: blanked before matching
+        String prose = "a literal saying + \".formatted(\" is not the shape";              // EXPECT-CLEAN: literal content is blanked before matching
+
+        // The two MEASURED legitimate neighbours, copied in shape from the corpus this rule
+        // scans (ConfigDriftContainerOracleTest:890 and DeployVerifyOracleTest:214, both
+        // read 2026-10-13). Invented valid cases prove the rule accepts what its author
+        // imagined; these two are what it has to accept to be worth having. In both, the
+        // fragment before the + is NAMED rather than written, so no literal of theirs is
+        // carrying an unsubstituted placeholder — CHECKLIST holds no % at all, and every
+        // conversion in the other one is in the formatted tail.
+        assertThat(failures)
+                .withFailMessage(CHECKLIST + """
+
+                        What the script reported: %s
+                        Failed: %s""".formatted(script, failures))                         // EXPECT-CLEAN: the head is a constant, not a literal
+                .isEmpty();
+        assertThat(pull >= 0)
+                .withFailMessage("%s", """
+                        build.yml no longer pulls one of \
+                        """ + IMAGE_CANDIDATES + """
+                         before the verify run.
+
+                        (pull step index %d, verify step index %d)""".formatted(pull, verify))// EXPECT-CLEAN: the fragment before the formatted tail is a constant
+                .isTrue();
+    }
+}

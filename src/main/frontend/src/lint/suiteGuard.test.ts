@@ -183,11 +183,33 @@ describe('the refusal is reachable from the build, and not from the suite it jud
       'With failonerror="false" and no resultproperty, a refusal is PRINTED and the build ' +
       'stays green — which is the same build as not checking at all.',
     ).toMatch(/resultproperty="hamstrack\.test-tree\.exit"/)
+    // The <fail> and the exit code it reads, as a PAIR. Written as `<fail message=`
+    // until HD-311, which gave the task an `if:set` gate (the step now answers for
+    // its own class file being absent under -Dmaven.test.skip=true, where the fork
+    // cannot run at all) — and this assertion went red on the attribute order,
+    // which is the right kind of red: it noticed. Attributes before `message` are
+    // allowed now; what is demanded is a <fail> whose condition reads the
+    // resultproperty. Whether that gate can ever be satisfied is a question about
+    // two properties in one file, so it is asked where cross-file comparisons live:
+    // SuiteCoverageGuardTest#everyAntrunForkOutOfTargetAnswersForItsOwnMissingClassFile.
+    //
+    // TWO THINGS WIDENED AND ONE NARROWED in HD-311 round 3, both found by the ops
+    // gate. (1) It demanded the property in `arg1` SPECIFICALLY, so the semantically
+    // identical `arg1="0" arg2="${…exit}"` would have reddened the SPA suite on a
+    // correct POM edit — a seal that refuses correct work is how a rule earns being
+    // distrusted, and the Java side already asserts the stronger property (the two
+    // operands as a SET, so neither the swap nor `arg1="0" arg2="0"` passes there).
+    // This arm keeps the custody question it exists for: the exit code becomes a
+    // <fail>. (2) `[\s\S]*?` crossed element boundaries, so a <condition> orphaned
+    // from any <fail> satisfied it; the tempered group cannot leave the <fail> it
+    // opened. Ant would refuse such a pom anyway, so that half tightens a claim
+    // rather than closing an exploit — but the claim was wider than the check, which
+    // is the half of a seal nobody re-reads.
     expect(
       guard,
       'the antrun guard no longer turns that exit code into a <fail>. See above: printing a ' +
       'refusal and exiting 0 is not a gate.',
-    ).toMatch(/<fail message=[\s\S]*hamstrack\.test-tree\.exit/)
+    ).toMatch(/<fail\b[^>]*>(?:(?!<\/fail>)[\s\S])*?<equals\b[^>]*\$\{hamstrack\.test-tree\.exit\}/)
     // The off-switch one level above both suites. maven-antrun-plugin's `run` goal
     // declares `skip` as an EDITABLE parameter defaulting to ${maven.antrun.skip},
     // so without this line `-Dmaven.antrun.skip=true` runs both suites in full,

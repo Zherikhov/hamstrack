@@ -15,8 +15,9 @@ docker start hamstrack-postgres hamstrack-mailhog
 ```
 Backend (bash):
 ```
-DB_URL="jdbc:postgresql://localhost:15432/hamstrack" DB_USERNAME="hamstrack" DB_PASSWORD="hamstrack" JWT_SECRET="dev-only-jwt-secret-hamstrack-0123456789abcdef" ./mvnw.cmd -q test -Dfrontend.skip=true
+DB_URL="jdbc:postgresql://localhost:15432/hamstrack" DB_USERNAME="hamstrack" DB_PASSWORD="hamstrack" JWT_SECRET="dev-only-jwt-secret-hamstrack-0123456789abcdef" ./mvnw.cmd -B test -Dfrontend.skip=true
 ```
+**`-B`, not `-q`** — this line said `-q` until HD-311 measured what that costs you. Maven `-q` is errors-only, so under it a passing run prints **nothing at all**: not the `[test-tree]`/`[vitest-tree]` lines item 3 obliges you to quote, not the disarm lines, not surefire's totals (measured: 0 bytes of stdout on a green run). The only witness that survives `-q` is `target/test-tree-summary.md`, and a stand-down branch does not write even that. A gate whose own command hides the evidence it must paste is the shape this bench exists to delete.
 PowerShell: same env vars, then `.\mvnw.cmd --% test -Dfrontend.skip=true` (prefix `-D` args with `--%`). `-Dfrontend.skip=true` skips the SPA build **and** the `npm-test` execution (HD-94, HD-242) — use it for a backend-only loop; drop it when the change touches the frontend. Single class/method: `-Dtest=ClassName` / `-Dtest=ClassName#method` (the suite-coverage guard disarms for filtered runs and says so).
 Frontend: `cd src/main/frontend && npm run typecheck && npx vitest run` (`typecheck` = `tsc -b`; never `tsc --noEmit` — it checks nothing). On Windows, stop the Vite dev server before any Maven build that includes the frontend.
 

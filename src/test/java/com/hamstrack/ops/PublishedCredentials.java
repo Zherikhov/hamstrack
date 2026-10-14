@@ -591,6 +591,18 @@ public final class PublishedCredentials {
      * The files this repository publishes, read from the index rather than from the working
      * tree: an untracked local file is not something anybody else can read, and letting one
      * take part would mean a checkout could pass or fail on files that are not in it.
+     *
+     * <p><strong>The consequence, because this is where a reader of a red floor lands</strong>
+     * (HD-311): every population built on this takes its NAMES from the index while every reader
+     * downstream takes CONTENT from disk, so a <em>newly added</em> file is invisible here until
+     * it is staged — and what fires first is not a missing-file message but the population's own
+     * floor, which is a confusing red to meet while writing the member that would satisfy it.
+     * {@code git add} the new file; nothing needs committing. The same split has bitten this
+     * project three times in two weeks from three directions — the Stop hook comparing a staged
+     * tree against what the suite actually read (HD-328), a test-class count that moved only once
+     * the class was staged (HD-343), and a new scan fixture whose floor went red while the fixture
+     * sat on disk (HD-311) — which is why the note is here, on the one method they all pass
+     * through, rather than copied onto each caller.
      */
     public static List<Path> trackedFiles() {
         var out = lsFiles("--cached");
