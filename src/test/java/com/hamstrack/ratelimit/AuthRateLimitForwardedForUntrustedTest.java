@@ -1,5 +1,6 @@
 package com.hamstrack.ratelimit;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -33,17 +34,21 @@ class AuthRateLimitForwardedForUntrustedTest {
 
     @Test
     void spoofedRotatingXffFromOneSocketStillTripsPerIpLimit() throws Exception {
-        // One real socket. Budget is 5/min. Each request carries a DIFFERENT
-        // (spoofed) X-Forwarded-For — if XFF were trusted, each would key a
-        // fresh budget and never 429. Since it's untrusted, the socket addr
-        // keys them all together and the 6th trips.
-        var socket = "203.0.113.9";
-        for (int i = 0; i < 5; i++) {
-            loginSpoofed(socket, "9.9.9." + i).andExpect(status().isUnauthorized());
-        }
-        loginSpoofed(socket, "9.9.9.250")
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+        // The key is the socket address (XFF is untrusted here), and RateLimitService's window is
+        // a fixed epoch minute — so the retry varies the socket.
+        FixedWindow.inOneMinute(attempt -> {
+            // One real socket. Budget is 5/min. Each request carries a DIFFERENT
+            // (spoofed) X-Forwarded-For — if XFF were trusted, each would key a
+            // fresh budget and never 429. Since it's untrusted, the socket addr
+            // keys them all together and the 6th trips.
+            var socket = "203.0.114." + attempt.suffix();
+            for (int i = 0; i < 5; i++) {
+                loginSpoofed(socket, "9.9.9." + i).andExpect(status().isUnauthorized());
+            }
+            loginSpoofed(socket, "9.9.9.250")
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 
     private ResultActions loginSpoofed(String socket, String spoofedXff) throws Exception {

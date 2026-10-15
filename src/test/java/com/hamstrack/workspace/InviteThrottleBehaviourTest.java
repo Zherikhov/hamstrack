@@ -6,6 +6,8 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.JwtService;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.FixedWindow;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
@@ -131,6 +133,15 @@ class InviteThrottleBehaviourTest {
      * one the caller can no longer see.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "InviteThrottle.requireRecipientCeilings",
+            reason = "The cooldown and the recipient daily cap are both sliding; the sender "
+                     + "volume budget, which IS a fixed hour window, cannot be the refuser "
+                     + "here: it is app.invites.max-per-sender-per-hour, which this context "
+                     + "leaves at its default of 20, and every sender in this body is minted "
+                     + "fresh and sends at most 3. The number is in application.properties "
+                     + "rather than in the annotation, so FixedWindowCoverageTest's arm A4 "
+                     + "cannot check this sentence - it is measured here and nowhere else.")
     void theTicketsAttackOneVictimManyWorkspacesIsRefused() throws Exception {
         var abuser = user();
         var first = workspaceOwnedBy(abuser);
@@ -164,6 +175,15 @@ class InviteThrottleBehaviourTest {
      * none because it reads as protection.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "InviteThrottle.requireRecipientCeilings",
+            reason = "The cooldown and the recipient daily cap are both sliding; the sender "
+                     + "volume budget, which IS a fixed hour window, cannot be the refuser "
+                     + "here: it is app.invites.max-per-sender-per-hour, which this context "
+                     + "leaves at its default of 20, and every sender in this body is minted "
+                     + "fresh and sends at most 3. The number is in application.properties "
+                     + "rather than in the annotation, so FixedWindowCoverageTest's arm A4 "
+                     + "cannot check this sentence - it is measured here and nowhere else.")
     void decliningTheInvitationDoesNotLiftTheCooldown() throws Exception {
         var abuser = user();
         var victimAddress = address("declines");
@@ -223,6 +243,15 @@ class InviteThrottleBehaviourTest {
      * is still the ceiling.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "InviteThrottle.requireRecipientCeilings",
+            reason = "The cooldown and the recipient daily cap are both sliding; the sender "
+                     + "volume budget, which IS a fixed hour window, cannot be the refuser "
+                     + "here: it is app.invites.max-per-sender-per-hour, which this context "
+                     + "leaves at its default of 20, and every sender in this body is minted "
+                     + "fresh and sends at most 3. The number is in application.properties "
+                     + "rather than in the annotation, so FixedWindowCoverageTest's arm A4 "
+                     + "cannot check this sentence - it is measured here and nowhere else.")
     void withdrawingTheInvitationDoesNotLiftTheCooldownAndTheEventRowKeepsItsTimestamp()
             throws Exception {
         var admin = user();
@@ -281,6 +310,15 @@ class InviteThrottleBehaviourTest {
      * read as "nobody has ever mailed this person". The sixth sender is still refused.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "InviteThrottle.requireRecipientCeilings",
+            reason = "The cooldown and the recipient daily cap are both sliding; the sender "
+                     + "volume budget, which IS a fixed hour window, cannot be the refuser "
+                     + "here: it is app.invites.max-per-sender-per-hour, which this context "
+                     + "leaves at its default of 20, and every sender in this body is minted "
+                     + "fresh and sends at most 3. The number is in application.properties "
+                     + "rather than in the annotation, so FixedWindowCoverageTest's arm A4 "
+                     + "cannot check this sentence - it is measured here and nowhere else.")
     void withdrawingEveryInvitationDoesNotRestoreTheRecipientsDailySlots() throws Exception {
         var victim = address("daily-cap");
 
@@ -355,50 +393,52 @@ class InviteThrottleBehaviourTest {
      */
     @Test
     void aNonMemberOverEveryCeilingGets404AndNever429() throws Exception {
-        var stranger = user();
-        var own = workspaceOwnedBy(stranger);
-        var victim = address("over-every-ceiling");
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var stranger = user();
+            var own = workspaceOwnedBy(stranger);
+            var victim = address("over-every-ceiling");
 
-        // Ceilings B and C, on one address: the stranger's own send (which arms their cooldown)
-        // plus enough distinct other senders to fill the global daily cap. The cap counts the
-        // caller's own sends one each and every OTHER sender once, so the stranger's own send is
-        // one of the five slots and four strangers fill the rest — the sixth distinct account is
-        // the one that trips it, which is section 6.3's arithmetic exactly.
-        invite(stranger, own, victim).andExpect(status().isCreated());
-        for (int i = 1; i < RECIPIENT_DAILY_DEFAULT; i++) {
-            var otherSender = user();
-            invite(otherSender, workspaceOwnedBy(otherSender), victim)
-                    .andExpect(status().isCreated());
-        }
+            // Ceilings B and C, on one address: the stranger's own send (which arms their cooldown)
+            // plus enough distinct other senders to fill the global daily cap. The cap counts the
+            // caller's own sends one each and every OTHER sender once, so the stranger's own send is
+            // one of the five slots and four strangers fill the rest — the sixth distinct account is
+            // the one that trips it, which is section 6.3's arithmetic exactly.
+            invite(stranger, own, victim).andExpect(status().isCreated());
+            for (int i = 1; i < RECIPIENT_DAILY_DEFAULT; i++) {
+                var otherSender = user();
+                invite(otherSender, workspaceOwnedBy(otherSender), victim)
+                        .andExpect(status().isCreated());
+            }
 
-        // Premise 1, the RECIPIENT ceilings, in a second workspace of the caller's own — where
-        // this address has never been invited, so nothing but the cooldown and the daily cap can
-        // refuse it. (In `own` the address is pending, and HD-133 answers 409 before the ceilings
-        // are consulted at all.) This refused request still costs a unit of sender volume, which
-        // the arithmetic below accounts for.
-        invite(stranger, workspaceOwnedBy(stranger), victim)
-                .andExpect(status().isTooManyRequests());
+            // Premise 1, the RECIPIENT ceilings, in a second workspace of the caller's own — where
+            // this address has never been invited, so nothing but the cooldown and the daily cap can
+            // refuse it. (In `own` the address is pending, and HD-133 answers 409 before the ceilings
+            // are consulted at all.) This refused request still costs a unit of sender volume, which
+            // the arithmetic below accounts for.
+            invite(stranger, workspaceOwnedBy(stranger), victim)
+                    .andExpect(status().isTooManyRequests());
 
-        // Ceiling A: the rest of the hourly budget, spent on addresses nobody else touches. Two
-        // units are already gone — the accepted send and the refused one above.
-        for (int i = 2; i < SENDER_HOURLY_DEFAULT; i++) {
-            invite(stranger, own, address("filler-" + i)).andExpect(status().isCreated());
-        }
+            // Ceiling A: the rest of the hourly budget, spent on addresses nobody else touches. Two
+            // units are already gone — the accepted send and the refused one above.
+            for (int i = 2; i < SENDER_HOURLY_DEFAULT; i++) {
+                invite(stranger, own, address("filler-" + i)).andExpect(status().isCreated());
+            }
 
-        // Premise 2, the SENDER budget, on an address that is free everywhere — so this 429 can
-        // only be the caller's own volume. Without both premises the 404s below could be a broken
-        // endpoint refusing everyone.
-        invite(stranger, own, address("one-too-many")).andExpect(status().isTooManyRequests());
+            // Premise 2, the SENDER budget, on an address that is free everywhere — so this 429 can
+            // only be the caller's own volume. Without both premises the 404s below could be a broken
+            // endpoint refusing everyone.
+            invite(stranger, own, address("one-too-many")).andExpect(status().isTooManyRequests());
 
-        // A caller who is not a member must not learn, from a 429, that this address has been
-        // invited elsewhere in the instance — nor that this workspace exists. Non-existence and
-        // non-membership are one answer: 404.
-        var somebodyElse = user();
-        invite(stranger, workspaceOwnedBy(somebodyElse), victim)
-                .andExpect(status().isNotFound());
+            // A caller who is not a member must not learn, from a 429, that this address has been
+            // invited elsewhere in the instance — nor that this workspace exists. Non-existence and
+            // non-membership are one answer: 404.
+            var somebodyElse = user();
+            invite(stranger, workspaceOwnedBy(somebodyElse), victim)
+                    .andExpect(status().isNotFound());
 
-        mockMvc.perform(inviteRequest(stranger, UUID.randomUUID(), victim))
-                .andExpect(status().isNotFound());
+            mockMvc.perform(inviteRequest(stranger, UUID.randomUUID(), victim))
+                    .andExpect(status().isNotFound());
+        });
     }
 
     // ================================================================ what a refusal costs
@@ -423,6 +463,15 @@ class InviteThrottleBehaviourTest {
      * path cannot leak a row, and a future mail dispatch moved above the throttle absolutely can.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "InviteThrottle.requireRecipientCeilings",
+            reason = "The cooldown and the recipient daily cap are both sliding; the sender "
+                     + "volume budget, which IS a fixed hour window, cannot be the refuser "
+                     + "here: it is app.invites.max-per-sender-per-hour, which this context "
+                     + "leaves at its default of 20, and every sender in this body is minted "
+                     + "fresh and sends at most 3. The number is in application.properties "
+                     + "rather than in the annotation, so FixedWindowCoverageTest's arm A4 "
+                     + "cannot check this sentence - it is measured here and nowhere else.")
     void aRefusedInviteWritesNothingAndSendsNothing() throws Exception {
         var sender = user();
         var invitee = address("refused");
@@ -481,28 +530,30 @@ class InviteThrottleBehaviourTest {
      */
     @Test
     void thePerSenderHourlyBudgetRefusesWithAMessageItsReaderCanActOn() throws Exception {
-        var admin = user();
-        var workspace = workspaceOwnedBy(admin);
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var admin = user();
+            var workspace = workspaceOwnedBy(admin);
 
-        for (int i = 0; i < SENDER_HOURLY_DEFAULT; i++) {
-            invite(admin, workspace, address("colleague-" + i)).andExpect(status().isCreated());
-        }
+            for (int i = 0; i < SENDER_HOURLY_DEFAULT; i++) {
+                invite(admin, workspace, address("colleague-" + i)).andExpect(status().isCreated());
+            }
 
-        var refusal = invite(admin, workspace, address("one-too-many"))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            var refusal = invite(admin, workspace, address("one-too-many"))
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        assertThat(detailOf(refusal))
-                .as("the reader is mid-onboarding: name both allowances so they can size the day, "
-                    + "and tell them the invitations already sent are unaffected so they do not "
-                    + "re-send them")
-                .contains(String.valueOf(SENDER_HOURLY_DEFAULT))
-                .contains("100")
-                .contains("already sent are unaffected");
-        assertThat(detailOf(refusal))
-                .as("a refusal may only prescribe an action its reader can perform, and 'ask an "
-                    + "administrator' is not one on Cloud")
-                .doesNotContain("administrator");
+            assertThat(detailOf(refusal))
+                    .as("the reader is mid-onboarding: name both allowances so they can size the day, "
+                        + "and tell them the invitations already sent are unaffected so they do not "
+                        + "re-send them")
+                    .contains(String.valueOf(SENDER_HOURLY_DEFAULT))
+                    .contains("100")
+                    .contains("already sent are unaffected");
+            assertThat(detailOf(refusal))
+                    .as("a refusal may only prescribe an action its reader can perform, and 'ask an "
+                        + "administrator' is not one on Cloud")
+                    .doesNotContain("administrator");
+        });
     }
 
     // ================================================================ fixture

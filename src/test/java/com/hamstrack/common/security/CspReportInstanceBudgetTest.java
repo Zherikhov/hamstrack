@@ -1,5 +1,6 @@
 package com.hamstrack.common.security;
 
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +43,19 @@ class CspReportInstanceBudgetTest {
     @Autowired MeterRegistry meterRegistry;
 
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.ROLL_INVARIANT_ASSERTION,
+            refusedBy = "CspReportBudget.spend",
+            reason = "The instance ceiling is one AtomicReference<Window> shared by every sender "
+                     + "reaching this Spring context - CspReportBudget.instance is an instance "
+                     + "field of a bean, not a static - so a fresh IP key gives this member "
+                     + "nothing and FixedWindow's retry would start mid-window. It asserts a "
+                     + "bound that survives any SINGLE roll instead of the exact count: twenty "
+                     + "reports against app.csp.reports-per-minute=5 refuse 15 in one window and "
+                     + "10 at the worst two-window split, and app.csp.reports-per-minute-per-ip="
+                     + "1000 cannot refuse two reports from each of ten addresses. Not across ANY "
+                     + "split: three windows would allow 5 refusals and four would allow 0, "
+                     + "neither reachable by a sub-second in-process loop. The arithmetic is "
+                     + "written out below and predates the fixture.")
     void tenSendersEachInsideTheirOwnBudgetStillHitTheInstanceCeiling() throws Exception {
         double before = dropped("budget");
         int refusals = 0;
@@ -63,10 +77,14 @@ class CspReportInstanceBudgetTest {
                     address, which is not a bound at all against anybody who has more than one. A \
                     sink hearing from ten simultaneously-violating clients has already told the \
                     operator everything it can and must not become the instance's log budget.""")
-                // 15 exactly when all twenty land in one minute, and >= 10 is what survives a
-                // window rolling mid-run: the split that refuses fewest is ten and ten, which
-                // still refuses five in each. Asserted as the bound rather than the number,
-                // because a test that is right 999 times in 1000 is a flake with a good excuse.
+                // 15 exactly when all twenty land in one minute, and >= 10 is what survives ONE
+                // window roll mid-run: the two-window split refusing fewest is ten and ten, which
+                // still refuses five in each, and every other such split refuses more. One roll,
+                // not any number of them - three windows would allow 5 refusals and four would
+                // allow 0, which is why this bound is stated per roll rather than per split; a
+                // sub-second in-process loop cannot cross two boundaries. Asserted as the bound
+                // rather than the number, because a test that is right 999 times in 1000 is a
+                // flake with a good excuse.
                 .isGreaterThanOrEqualTo(10);
         assertThat(dropped("budget") - before).isEqualTo(refusals);
     }

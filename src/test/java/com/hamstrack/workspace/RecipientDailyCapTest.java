@@ -7,6 +7,7 @@ import com.hamstrack.common.mail.MailSendEventRepository;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.common.ratelimit.RecipientMailThrottle;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import org.junit.jupiter.api.Test;
@@ -252,6 +253,12 @@ class RecipientDailyCapTest {
      * <em>is</em> the remedy.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecord",
+            reason = "RecipientMailThrottle counts over now.minus(policy.cooldown()) and "
+                     + "now.minus(policy.ceilingWindow()), both DB-backed and both sliding, so "
+                     + "no boundary resets anything and a delay can only strengthen the "
+                     + "refusal.")
     void theSixthDistinctSenderIsRefusedAndToldNothingAboutTheOtherFive() {
         var victim = address("terse");
         for (int i = 0; i < CAP; i++) {
@@ -309,6 +316,12 @@ class RecipientDailyCapTest {
      * a rounded duration, not a rounded deadline.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecord",
+            reason = "The refusal is the sliding day window, and the 900s quantum rounds an "
+                     + "ABSOLUTE deadline derived from a seeded send instant - not a counter "
+                     + "window - so no quantum roll can move deadlineEpochSecond and all three "
+                     + "assertions are invariant under one.")
     void theDailyWaitNamesAnAbsoluteDeadlineAndNotARemainingDuration() throws Exception {
         var victim = address("deadline");
         for (int i = 0; i < CAP; i++) {
@@ -413,6 +426,12 @@ class RecipientDailyCapTest {
      * merely describing.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecord",
+            reason = "RecipientMailThrottle counts over now.minus(policy.cooldown()) and "
+                     + "now.minus(policy.ceilingWindow()), both DB-backed and both sliding, so "
+                     + "no boundary resets anything and a delay can only strengthen the "
+                     + "refusal.")
     void theCooldownWaitIsExactBecauseTheInstantIsTheCallersOwn() {
         var invitee = address("cooldown-exact");
         var sender = UUID.randomUUID();

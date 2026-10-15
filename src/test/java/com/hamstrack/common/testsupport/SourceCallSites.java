@@ -51,12 +51,41 @@ public final class SourceCallSites {
     /** What a line before the first declaration in a file is attributed to. */
     public static final String FILE_SCOPE = "<file scope>";
 
-    private static final Path MAIN_SOURCES = Path.of("src", "main", "java");
+    /** The production tree — what {@link #callers} and {@link #callerBodies} read. */
+    public static final Path MAIN_SOURCES = Path.of("src", "main", "java");
+
+    /**
+     * The test tree. Readable through {@link #unitsUnder(Path, Set)} because a seal over the SUITE
+     * needs the same attribution a seal over production does, and the alternative was a fourth copy
+     * of this parser (HD-334). The root is a parameter rather than a second constant pair of methods
+     * so that there is one walk, one comment predicate and one declaration pattern for both trees;
+     * a reader that wants a different root passes it.
+     */
+    public static final Path TEST_SOURCES = Path.of("src", "test", "java");
+
+    /**
+     * A line that declares a method to be a test — the one spelling of this question in the suite,
+     * shared rather than copied because {@link #DECLARATION}'s four-space assumption is only safe
+     * for a tree whose test methods sit at exactly that depth, and the arm that holds that
+     * ({@code SourceCallSitesTest#everyTestAnnotationInTheSuiteSitsWhereTheParserCanAttributeIt})
+     * must ask it with the same pattern as the consumer it protects.
+     *
+     * <p>Anchored at the start of the line, so {@code {@code @Test}} in prose is not a declaration
+     * and {@code @TestConfiguration} is not a test ({@code \b} after {@code Test} refuses it).
+     */
+    public static final Pattern TEST_ANNOTATION =
+            Pattern.compile("^\\s*@(Test|ParameterizedTest|RepeatedTest)\\b");
 
     // EXACTLY four spaces, asserted with a lookahead rather than left to the `^ {4}` prefix: the
     // type class below contains \s, so without it a deeper-indented line still matches with the
     // extra indentation absorbed. Indentation is what actually distinguishes a declaration from a
     // call in this codebase's style, so it is asserted directly.
+    //
+    // That assumption was sound for src/main/java, where this parser was built, and it travelled
+    // to src/test/java with the root parameter (HD-334) — into the one tree where a @Nested class
+    // can put a method eight spaces in. A @Test the parser cannot attribute is invisible to a
+    // population built on it, in the FALSE-GREEN direction: the member is neither demanded to be
+    // guarded nor flagged as a stale exemption. Held by the arm named on TEST_ANNOTATION above.
     static final Pattern DECLARATION = Pattern.compile(
             "^ {4}(?=\\S)(?:public|protected|private)?\\s*(?:static\\s+)?"
             + "(?:final\\s+)?[\\w.<>\\[\\],?\\s]+\\s(\\w+)\\s*\\([^;]*$");
@@ -195,15 +224,39 @@ public final class SourceCallSites {
         return opened >= 0 && before.indexOf("*/", opened + 2) < 0;
     }
 
-    private record CompilationUnit(String type, List<String> lines) {
+    /**
+     * One {@code .java} file: its path, its simple type name and its lines.
+     *
+     * @param path  the path it was read from, so a consumer can report {@code file:line}
+     * @param type  the simple name, i.e. the file name without {@code .java}
+     * @param lines as read, untrimmed — {@link #DECLARATION}'s indentation lookahead needs them
+     */
+    public record CompilationUnit(Path path, String type, List<String> lines) {
     }
 
-    private static List<CompilationUnit> compilationUnits(Set<String> excludedFiles)
+    /**
+     * Every {@code .java} file under {@code root}, in tree order.
+     *
+     * <p><strong>Never silently empty.</strong> A missing root throws rather than returning no
+     * units: every consumer of this walk asserts "nothing offends", so a walk that stopped finding
+     * files is the greenest possible answer to a seal that has stopped working.
+     *
+     * @param root          {@link #MAIN_SOURCES}, {@link #TEST_SOURCES}, or a temp tree a harness
+     *                      planted — the last is what lets a population seal be proven by a plant
+     *                      without touching the repository (HD-328: a half-reverted plant is a tree
+     *                      whose index and work tree disagree)
+     * @param excludedFiles simple file names to skip
+     */
+    public static List<CompilationUnit> unitsUnder(Path root, Set<String> excludedFiles)
             throws IOException {
+        if (!Files.isDirectory(root)) {
+            throw new IOException("source root " + root.toAbsolutePath() + " is not a directory — "
+                                  + "a scan over a root that does not exist reports clean for ever");
+        }
         var units = new ArrayList<CompilationUnit>();
         List<Path> files;
-        try (Stream<Path> paths = Files.walk(MAIN_SOURCES)) {
-            files = paths.filter(p -> p.toString().endsWith(".java")).toList();
+        try (Stream<Path> paths = Files.walk(root)) {
+            files = paths.filter(p -> p.toString().endsWith(".java")).sorted().toList();
         }
         for (var path : files) {
             var file = path.getFileName().toString();
@@ -211,8 +264,14 @@ public final class SourceCallSites {
                 continue;
             }
             var type = file.substring(0, file.length() - ".java".length());
-            units.add(new CompilationUnit(type, Files.readAllLines(path, StandardCharsets.UTF_8)));
+            units.add(new CompilationUnit(path, type,
+                    Files.readAllLines(path, StandardCharsets.UTF_8)));
         }
         return units;
+    }
+
+    private static List<CompilationUnit> compilationUnits(Set<String> excludedFiles)
+            throws IOException {
+        return unitsUnder(MAIN_SOURCES, excludedFiles);
     }
 }

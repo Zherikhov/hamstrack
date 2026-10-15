@@ -1,5 +1,6 @@
 package com.hamstrack.report;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -56,35 +57,40 @@ class AgingReportThrottleTest extends CycleTimeTestBase {
      */
     @Test
     void aNonMemberIsThrottledBeforeTenancyIsResolved() throws Exception {
-        var mine = newProject();
-        var theirs = newProject();   // its own workspace, its own owner
+        // The whole block spends ONE principal's epoch-minute window, so a boundary falling inside
+        // it would reset the count and turn the 429 into a 404 — a fresh principal per attempt
+        // comes free from newProject().
+        FixedWindow.inOneMinute(attempt -> {
+            var mine = newProject();
+            var theirs = newProject();   // its own workspace, its own owner
 
-        var foreign = "/api/workspaces/" + theirs.wsId() + "/projects/" + theirs.projectId()
-                      + "/reports/aging";
+            var foreign = "/api/workspaces/" + theirs.wsId() + "/projects/" + theirs.projectId()
+                          + "/reports/aging";
 
-        // Three probes at a project I am not a member of. 404 every time — the tenancy contract
-        // is untouched by the throttle — and each one still costs me a unit.
-        for (int i = 0; i < 3; i++) {
+            // Three probes at a project I am not a member of. 404 every time — the tenancy contract
+            // is untouched by the throttle — and each one still costs me a unit.
+            for (int i = 0; i < 3; i++) {
+                mockMvc.perform(get(foreign).header("Authorization", "Bearer " + mine.token()))
+                        .andExpect(status().isNotFound());
+            }
+
+            // The fourth is 429, not 404: the budget was already gone when the request arrived, and
+            // the interceptor never learned whether the project exists.
             mockMvc.perform(get(foreign).header("Authorization", "Bearer " + mine.token()))
-                    .andExpect(status().isNotFound());
-        }
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        // The fourth is 429, not 404: the budget was already gone when the request arrived, and
-        // the interceptor never learned whether the project exists.
-        mockMvc.perform(get(foreign).header("Authorization", "Bearer " + mine.token()))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            // Byte-identical for a workspace and project that do not exist at all, so the 429 cannot
+            // be read as "that one was real". This is the disclosure property the ordering buys.
+            mockMvc.perform(get("/api/workspaces/" + UUID.randomUUID()
+                            + "/projects/" + UUID.randomUUID() + "/reports/aging")
+                            .header("Authorization", "Bearer " + mine.token()))
+                    .andExpect(status().isTooManyRequests());
 
-        // Byte-identical for a workspace and project that do not exist at all, so the 429 cannot
-        // be read as "that one was real". This is the disclosure property the ordering buys.
-        mockMvc.perform(get("/api/workspaces/" + UUID.randomUUID()
-                        + "/projects/" + UUID.randomUUID() + "/reports/aging")
-                        .header("Authorization", "Bearer " + mine.token()))
-                .andExpect(status().isTooManyRequests());
-
-        // And the probed project's own owner is served normally throughout: a scan against you
-        // must never throttle you.
-        getAging(theirs, theirs.token()).andExpect(status().isOk());
+            // And the probed project's own owner is served normally throughout: a scan against you
+            // must never throttle you.
+            getAging(theirs, theirs.token()).andExpect(status().isOk());
+        });
     }
 
     /**
@@ -95,14 +101,18 @@ class AgingReportThrottleTest extends CycleTimeTestBase {
      */
     @Test
     void theBudgetIsSharedAcrossEveryReportOnTheBasePath() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        getAging(ctx, ctx.token()).andExpect(status().isOk());
-        getCycleTime(ctx, ctx.token(), "?from=2025-03-01&to=2025-03-05").andExpect(status().isOk());
-        getFlow(ctx, ctx.token(), "?from=2025-03-01&to=2025-03-05").andExpect(status().isOk());
+            getAging(ctx, ctx.token()).andExpect(status().isOk());
+            getCycleTime(ctx, ctx.token(), "?from=2025-03-01&to=2025-03-05")
+                    .andExpect(status().isOk());
+            getFlow(ctx, ctx.token(), "?from=2025-03-01&to=2025-03-05")
+                    .andExpect(status().isOk());
 
-        getAging(ctx, ctx.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            getAging(ctx, ctx.token())
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 }

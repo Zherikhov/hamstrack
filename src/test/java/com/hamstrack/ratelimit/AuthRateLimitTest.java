@@ -3,6 +3,8 @@ package com.hamstrack.ratelimit;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.FixedWindow;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -47,6 +49,14 @@ class AuthRateLimitTest {
     }
 
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RateLimitService.checkLoginAllowed",
+            reason = "The per-account backoff is blockedUntilEpochMs derived from the LAST failure "
+                     + "instant, so it slides and nothing resets on a boundary — a delay can only "
+                     + "strengthen the block. The per-IP fixed window in the same class, "
+                     + "app.rate-limit.auth-ip-requests-per-minute=5, is never the refuser here: "
+                     + "the four requests come from four different addresses, so this body spends "
+                     + "1 of the 5 on each key.")
     void loginBackoffKicksInAfterConsecutiveFailures() throws Exception {
         for (int i = 0; i < 3; i++) {
             login(email, "wrong-password", "10.1.0." + i).andExpect(status().isUnauthorized());
@@ -72,21 +82,31 @@ class AuthRateLimitTest {
 
     @Test
     void perIpBudgetReturns429WithProblemBody() throws Exception {
-        var ip = "10.3.0.7";
-        // Budget is 5/min; each request targets a different unknown email so
-        // the per-account backoff never triggers — only the IP window can
-        for (int i = 0; i < 5; i++) {
-            login("nobody-" + i + "@example.com", "x-wrong-pass", ip).andExpect(status().isUnauthorized());
-        }
-        login("nobody-final@example.com", "x-wrong-pass", ip)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(content -> {
-                    var body = content.getResponse().getContentAsString();
-                    if (!body.contains("\"status\":429")) {
-                        throw new AssertionError("Expected problem+json body with status 429, got: " + body);
-                    }
-                });
+        // The per-IP fixed epoch-minute window. BOTH keys vary per attempt, and the second one is
+        // not optional: the addresses accumulate login failures (recordLoginFailure is fed for
+        // unknown addresses on purpose, so the limiter cannot be used to probe which are
+        // registered), so a retry on the same six would cross login-failure-threshold=3 and answer
+        // 429 from the per-ACCOUNT backoff where this test asserts 401.
+        FixedWindow.inOneMinute(attempt -> {
+            var ip = "10.3." + attempt.suffix() + ".7";
+            var inbox = "nobody-" + attempt.suffix() + "-";
+            // Budget is 5/min; each request targets a different unknown email so
+            // the per-account backoff never triggers — only the IP window can
+            for (int i = 0; i < 5; i++) {
+                login(inbox + i + "@example.com", "x-wrong-pass", ip)
+                        .andExpect(status().isUnauthorized());
+            }
+            login(inbox + "final@example.com", "x-wrong-pass", ip)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(content -> {
+                        var body = content.getResponse().getContentAsString();
+                        if (!body.contains("\"status\":429")) {
+                            throw new AssertionError(
+                                    "Expected problem+json body with status 429, got: " + body);
+                        }
+                    });
+        });
     }
 
     private org.springframework.test.web.servlet.ResultActions login(String email, String password, String ip)

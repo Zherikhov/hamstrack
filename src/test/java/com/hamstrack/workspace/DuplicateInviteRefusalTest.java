@@ -1,5 +1,6 @@
 package com.hamstrack.workspace;
 
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
@@ -312,6 +313,13 @@ class DuplicateInviteRefusalTest {
      * what the second half of this test observes.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecord",
+            reason = "The 429 here is the per-(sender, inbox) cooldown, which is sliding; "
+                     + "the caller is three sends into app.invites.max-per-sender-per-hour, "
+                     + "left at its default of 20 by this context, so the fixed hour window "
+                     + "cannot be the refuser. That default is in application.properties and "
+                     + "not in the annotation, so arm A4 cannot check this sentence.")
     void aCaseVariantCollidesAndATaggedVariantIsADifferentOffer() throws Exception {
         var admin = user();
         var workspace = workspaceOwnedBy(admin);

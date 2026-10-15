@@ -1,5 +1,6 @@
 package com.hamstrack.report;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -47,19 +48,21 @@ class FlowReportThrottleTest extends FlowReportTestBase {
 
     @Test
     void aMemberPastTheBudgetGetsA429WithRetryAfter() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        for (int i = 0; i < 3; i++) {
-            getFlow(ctx, ctx.token(), WINDOW).andExpect(status().isOk());
-        }
+            for (int i = 0; i < 3; i++) {
+                getFlow(ctx, ctx.token(), WINDOW).andExpect(status().isOk());
+            }
 
-        getFlow(ctx, ctx.token(), WINDOW)
-                .andExpect(status().isTooManyRequests())
-                // The shared 429 envelope: a client that can't see Retry-After can only guess.
-                .andExpect(header().exists("Retry-After"))
-                // And the detail says what is throttled — the generic "too many requests"
-                // would leave a user staring at a chart that just stopped loading.
-                .andExpect(jsonPath("$.detail", containsString("report")));
+            getFlow(ctx, ctx.token(), WINDOW)
+                    .andExpect(status().isTooManyRequests())
+                    // The shared 429 envelope: a client that can't see Retry-After can only guess.
+                    .andExpect(header().exists("Retry-After"))
+                    // And the detail says what is throttled — the generic "too many requests"
+                    // would leave a user staring at a chart that just stopped loading.
+                    .andExpect(jsonPath("$.detail", containsString("report")));
+        });
     }
 
     /**
@@ -70,16 +73,18 @@ class FlowReportThrottleTest extends FlowReportTestBase {
      */
     @Test
     void theBudgetIsPerPrincipalNotPerProject() throws Exception {
-        var ctx = newProject();
-        var other = actorWith(ctx, "MEMBER", "MEMBER");
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
+            var other = actorWith(ctx, "MEMBER", "MEMBER");
 
-        for (int i = 0; i < 3; i++) {
-            getFlow(ctx, ctx.token(), WINDOW).andExpect(status().isOk());
-        }
-        getFlow(ctx, ctx.token(), WINDOW).andExpect(status().isTooManyRequests());
+            for (int i = 0; i < 3; i++) {
+                getFlow(ctx, ctx.token(), WINDOW).andExpect(status().isOk());
+            }
+            getFlow(ctx, ctx.token(), WINDOW).andExpect(status().isTooManyRequests());
 
-        getFlow(ctx, other.token(), WINDOW)
-                .andExpect(status().isOk());
+            getFlow(ctx, other.token(), WINDOW)
+                    .andExpect(status().isOk());
+        });
     }
 
     /**
@@ -105,34 +110,36 @@ class FlowReportThrottleTest extends FlowReportTestBase {
      */
     @Test
     void theBudgetIsSpentBeforeTenancyIsResolved() throws Exception {
-        var mine = newProject();
-        var theirs = newProject();   // its own workspace, its own owner
+        FixedWindow.inOneMinute(attempt -> {
+            var mine = newProject();
+            var theirs = newProject();   // its own workspace, its own owner
 
-        var foreign = "/api/workspaces/" + theirs.wsId() + "/projects/" + theirs.projectId()
-                + "/reports/flow" + WINDOW;
+            var foreign = "/api/workspaces/" + theirs.wsId() + "/projects/" + theirs.projectId()
+                    + "/reports/flow" + WINDOW;
 
-        // Three probes at a project I am not a member of: 404 every time, and each one
-        // still costs me a unit — the interceptor never learns whether the project exists.
-        for (int i = 0; i < 3; i++) {
+            // Three probes at a project I am not a member of: 404 every time, and each one
+            // still costs me a unit — the interceptor never learns whether the project exists.
+            for (int i = 0; i < 3; i++) {
+                mockMvc.perform(get(foreign).header("Authorization", "Bearer " + mine.token()))
+                        .andExpect(status().isNotFound());
+            }
+
+            // The fourth is 429, NOT 404. The budget is gone, and it was gone before anything
+            // looked up a workspace.
             mockMvc.perform(get(foreign).header("Authorization", "Bearer " + mine.token()))
-                    .andExpect(status().isNotFound());
-        }
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        // The fourth is 429, NOT 404. The budget is gone, and it was gone before anything
-        // looked up a workspace.
-        mockMvc.perform(get(foreign).header("Authorization", "Bearer " + mine.token()))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            // And the 429 is byte-identical for a project that does not exist at all, so it
+            // cannot be read as "this one was real" — nothing about tenancy leaks through it.
+            mockMvc.perform(get("/api/workspaces/" + java.util.UUID.randomUUID()
+                            + "/projects/" + java.util.UUID.randomUUID() + "/reports/flow" + WINDOW)
+                            .header("Authorization", "Bearer " + mine.token()))
+                    .andExpect(status().isTooManyRequests());
 
-        // And the 429 is byte-identical for a project that does not exist at all, so it
-        // cannot be read as "this one was real" — nothing about tenancy leaks through it.
-        mockMvc.perform(get("/api/workspaces/" + java.util.UUID.randomUUID()
-                        + "/projects/" + java.util.UUID.randomUUID() + "/reports/flow" + WINDOW)
-                        .header("Authorization", "Bearer " + mine.token()))
-                .andExpect(status().isTooManyRequests());
-
-        // Meanwhile the project's own owner — whose budget the outsider cannot touch — is
-        // served normally. A probe against you must not throttle you.
-        getFlow(theirs, theirs.token(), WINDOW).andExpect(status().isOk());
+            // Meanwhile the project's own owner — whose budget the outsider cannot touch — is
+            // served normally. A probe against you must not throttle you.
+            getFlow(theirs, theirs.token(), WINDOW).andExpect(status().isOk());
+        });
     }
 }

@@ -1,5 +1,6 @@
 package com.hamstrack.report;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -47,31 +48,35 @@ class ReportCsvThrottleTest extends ReportCsvTestBase {
 
     @Test
     void anExportPastTheBudgetIsA429WithRetryAfter() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        for (int i = 0; i < 4; i++) {
-            getCsv(ctx, ctx.token(), "aging.csv", "").andExpect(status().isOk());
-        }
+            for (int i = 0; i < 4; i++) {
+                getCsv(ctx, ctx.token(), "aging.csv", "").andExpect(status().isOk());
+            }
 
-        getCsv(ctx, ctx.token(), "aging.csv", "")
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(jsonPath("$.detail", containsString("report")));
+            getCsv(ctx, ctx.token(), "aging.csv", "")
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(jsonPath("$.detail", containsString("report")));
+        });
     }
 
     @Test
     void anExportAndItsJsonEndpointShareOnePot() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        getAging(ctx, ctx.token()).andExpect(status().isOk());
-        getCsv(ctx, ctx.token(), "aging.csv", "").andExpect(status().isOk());
-        getAging(ctx, ctx.token()).andExpect(status().isOk());
-        getCsv(ctx, ctx.token(), "aging.csv", "").andExpect(status().isOk());
+            getAging(ctx, ctx.token()).andExpect(status().isOk());
+            getCsv(ctx, ctx.token(), "aging.csv", "").andExpect(status().isOk());
+            getAging(ctx, ctx.token()).andExpect(status().isOk());
+            getCsv(ctx, ctx.token(), "aging.csv", "").andExpect(status().isOk());
 
-        getCsv(ctx, ctx.token(), "aging.csv", "")
-                .andExpect(status().isTooManyRequests());
-        getAging(ctx, ctx.token())
-                .andExpect(status().isTooManyRequests());
+            getCsv(ctx, ctx.token(), "aging.csv", "")
+                    .andExpect(status().isTooManyRequests());
+            getAging(ctx, ctx.token())
+                    .andExpect(status().isTooManyRequests());
+        });
     }
 
 }

@@ -1,5 +1,6 @@
 package com.hamstrack.report;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -32,16 +33,18 @@ class SprintReportThrottleTest extends SprintReportTestBase {
 
     @Test
     void theSprintReportsShareTheOneReportBudget() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        getBurnup(ctx, ctx.token(), null).andExpect(status().isOk());
-        getReview(ctx, ctx.token(), null).andExpect(status().isOk());
+            getBurnup(ctx, ctx.token(), null).andExpect(status().isOk());
+            getReview(ctx, ctx.token(), null).andExpect(status().isOk());
 
-        // The third request is over the budget whichever of the two it is: one pot, not one each.
-        getBurnup(ctx, ctx.token(), null)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
-        getReview(ctx, ctx.token(), null).andExpect(status().isTooManyRequests());
+            // The third request is over the budget whichever of the two it is: one pot, not one each.
+            getBurnup(ctx, ctx.token(), null)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+            getReview(ctx, ctx.token(), null).andExpect(status().isTooManyRequests());
+        });
     }
 
     /**
@@ -51,13 +54,15 @@ class SprintReportThrottleTest extends SprintReportTestBase {
      */
     @Test
     void velocityIsOnTheSameBudget() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        getVelocity(ctx, ctx.token(), null).andExpect(status().isOk());
-        getVelocity(ctx, ctx.token(), null).andExpect(status().isOk());
+            getVelocity(ctx, ctx.token(), null).andExpect(status().isOk());
+            getVelocity(ctx, ctx.token(), null).andExpect(status().isOk());
 
-        getVelocity(ctx, ctx.token(), null)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            getVelocity(ctx, ctx.token(), null)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 }

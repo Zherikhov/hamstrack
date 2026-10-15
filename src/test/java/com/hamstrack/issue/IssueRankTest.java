@@ -1,5 +1,6 @@
 package com.hamstrack.issue;
 
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -366,6 +367,16 @@ class IssueRankTest extends SprintTestBase {
      * </ul>
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "IssueRankService.requireRebalanceAllowed",
+            reason = "The rebalance cutoff is now - previous < REBALANCE_COOLDOWN_MS, a "
+                     + "sliding comparison against the last rebalance, and its Retry-After is "
+                     + "the remaining cooldown clamped to at least 1 - so the between(1, 60) "
+                     + "assertion holds at every phase. This context also declares "
+                     + "app.rate-limit.enabled=false, which every PerPrincipalMinuteBudget "
+                     + "subclass, RateLimitService and InviteSenderVolumeBudget read before "
+                     + "counting anything, so the only fixed window still live in this "
+                     + "context is CspReportBudget's - unreachable from a backlog reorder.")
     void aSecondWholeProjectRebalanceInsideTheCooldownIs429() throws Exception {
         var ctx = newProject();
         var top = createIssue(ctx, "the fixed upper anchor");

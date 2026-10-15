@@ -1,5 +1,6 @@
 package com.hamstrack.common.security;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,33 +42,43 @@ class CspReportBudgetTest {
 
     @Test
     void theFourthReportFromOneSenderIsRefusedWithRetryAfterAndCounted() throws Exception {
-        var ip = "198.51.100.21";
-        double before = dropped("budget");
+        // The PER-IP window (the instance ceiling is 10000 here), so a retry on a fresh address
+        // gets a fresh window — unlike CspReportInstanceBudgetTest, whose ceiling is shared by
+        // every sender reaching one context and which therefore asserts a roll-invariant bound
+        // instead. Neither window is static: both are instance fields of CspReportBudget, so each
+        // ceiling belongs to a CONTEXT and never to the JVM, and every context that boots the sink
+        // has a pair of its own. (No count of those here: it would go stale one context before the
+        // list did, and this suite boots the sink with several different dial sets.)
+        FixedWindow.inOneMinute(attempt -> {
+            var ip = "198.51.100.2" + attempt.suffix();
+            double before = dropped("budget");
 
-        for (int i = 1; i <= 3; i++) {
-            assertThat(send(ip).getStatus()).as("report %d of the per-IP budget", i).isEqualTo(204);
-        }
-        var refused = send(ip);
+            for (int i = 1; i <= 3; i++) {
+                assertThat(send(ip).getStatus())
+                        .as("report %d of the per-IP budget", i).isEqualTo(204);
+            }
+            var refused = send(ip);
 
-        assertThat(refused.getStatus())
-                .as("""
-                    THE SINK MUST HAVE A BOUND OF ITS OWN, AND IT MUST HOLD WITH \
-                    app.rate-limit.enabled=false.
+            assertThat(refused.getStatus())
+                    .as("""
+                        THE SINK MUST HAVE A BOUND OF ITS OWN, AND IT MUST HOLD WITH \
+                        app.rate-limit.enabled=false.
 
-                    This is the only bound on an endpoint that needs no account. If the master \
-                    switch reached it, "turn off rate limiting while I debug something" would \
-                    quietly mean "let anyone on the internet write unlimited lines into this \
-                    instance's log".""")
-                .isEqualTo(429);
-        assertThat(refused.getHeader("Retry-After"))
-                .as("a refusal may only prescribe an action its reader can perform, so it says "
-                    + "when the window rolls")
-                .isNotNull();
-        assertThat(Integer.parseInt(refused.getHeader("Retry-After"))).isBetween(1, 60);
-        assertThat(refused.getContentAsString())
-                .as("no body: there is nothing a report sender is entitled to know")
-                .isEmpty();
-        assertThat(dropped("budget") - before).isEqualTo(1.0);
+                        This is the only bound on an endpoint that needs no account. If the master \
+                        switch reached it, "turn off rate limiting while I debug something" would \
+                        quietly mean "let anyone on the internet write unlimited lines into this \
+                        instance's log".""")
+                    .isEqualTo(429);
+            assertThat(refused.getHeader("Retry-After"))
+                    .as("a refusal may only prescribe an action its reader can perform, so it says "
+                        + "when the window rolls")
+                    .isNotNull();
+            assertThat(Integer.parseInt(refused.getHeader("Retry-After"))).isBetween(1, 60);
+            assertThat(refused.getContentAsString())
+                    .as("no body: there is nothing a report sender is entitled to know")
+                    .isEmpty();
+            assertThat(dropped("budget") - before).isEqualTo(1.0);
+        });
     }
 
     private MockHttpServletResponse send(String ip) throws Exception {

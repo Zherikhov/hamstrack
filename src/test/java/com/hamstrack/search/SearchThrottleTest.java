@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import com.hamstrack.issue.LabelTestBase;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -51,24 +52,26 @@ class SearchThrottleTest extends LabelTestBase {
 
     @Test
     void thePlainSearchPostIsThrottledAndTheRefusalArrivesBeforeTenancy() throws Exception {
-        var mine = newProject();
-        var theirs = newProject();   // its own workspace, its own owner
+        FixedWindow.inOneMinute(attempt -> {
+            var mine = newProject();
+            var theirs = newProject();   // its own workspace, its own owner
 
-        // Three searches against a workspace I am not a member of: 404 every time, and each still
-        // costs me a unit of my own budget.
-        for (int i = 0; i < 3; i++) {
-            search(theirs.wsId(), mine.token()).andExpect(status().isNotFound());
-        }
+            // Three searches against a workspace I am not a member of: 404 every time, and each still
+            // costs me a unit of my own budget.
+            for (int i = 0; i < 3; i++) {
+                search(theirs.wsId(), mine.token()).andExpect(status().isNotFound());
+            }
 
-        search(theirs.wsId(), mine.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            search(theirs.wsId(), mine.token())
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        // Identical for a workspace that does not exist at all.
-        search(UUID.randomUUID(), mine.token()).andExpect(status().isTooManyRequests());
+            // Identical for a workspace that does not exist at all.
+            search(UUID.randomUUID(), mine.token()).andExpect(status().isTooManyRequests());
 
-        // A scan against you must never throttle you.
-        search(theirs.wsId(), theirs.token()).andExpect(status().isOk());
+            // A scan against you must never throttle you.
+            search(theirs.wsId(), theirs.token()).andExpect(status().isOk());
+        });
     }
 
     /**
@@ -77,20 +80,22 @@ class SearchThrottleTest extends LabelTestBase {
      */
     @Test
     void schemaAndSuggestSpendTheSameBudgetAsSearch() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/search/schema")
-                        .header("Authorization", "Bearer " + ctx.token()))
-                .andExpect(status().isOk());
-        mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/search/suggest")
-                        .param("field", "assignee")
-                        .header("Authorization", "Bearer " + ctx.token()))
-                .andExpect(status().isOk());
-        search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
+            mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/search/schema")
+                            .header("Authorization", "Bearer " + ctx.token()))
+                    .andExpect(status().isOk());
+            mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/search/suggest")
+                            .param("field", "assignee")
+                            .header("Authorization", "Bearer " + ctx.token()))
+                    .andExpect(status().isOk());
+            search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
 
-        search(ctx.wsId(), ctx.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            search(ctx.wsId(), ctx.token())
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 
     /**
@@ -102,15 +107,17 @@ class SearchThrottleTest extends LabelTestBase {
      */
     @Test
     void theInsightsPanelSpendsTheSearchBudgetToo() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
-        search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
-        insights(ctx.wsId(), ctx.token(), "STATUS").andExpect(status().isOk());
+            search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
+            search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
+            insights(ctx.wsId(), ctx.token(), "STATUS").andExpect(status().isOk());
 
-        insights(ctx.wsId(), ctx.token(), "STATUS")
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            insights(ctx.wsId(), ctx.token(), "STATUS")
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 
     /**
@@ -131,20 +138,22 @@ class SearchThrottleTest extends LabelTestBase {
      */
     @Test
     void savedFilterWritesSpendTheSearchBudget() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
-        search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
-        // The third unit of the SEARCH budget, spent by a filter create.
-        createFilter(ctx.wsId(), ctx.token(), "Everything").andExpect(status().isCreated());
+            search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
+            search(ctx.wsId(), ctx.token()).andExpect(status().isOk());
+            // The third unit of the SEARCH budget, spent by a filter create.
+            createFilter(ctx.wsId(), ctx.token(), "Everything").andExpect(status().isCreated());
 
-        search(ctx.wsId(), ctx.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
-        // …and the exhausted search budget refuses the filter surface too — one pot, both ways.
-        createFilter(ctx.wsId(), ctx.token(), "Anything else")
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            search(ctx.wsId(), ctx.token())
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+            // …and the exhausted search budget refuses the filter surface too — one pot, both ways.
+            createFilter(ctx.wsId(), ctx.token(), "Anything else")
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 
     private ResultActions createFilter(UUID wsId, String token, String name) throws Exception {

@@ -1,6 +1,8 @@
 package com.hamstrack.issue;
 
 import com.hamstrack.common.ratelimit.ExpensiveReadConcurrencyLimit;
+import com.hamstrack.common.testsupport.FixedWindow;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.junit.jupiter.api.AfterEach;
@@ -96,6 +98,13 @@ class PlanningConcurrencyTest extends LabelTestBase {
     /**
      * Nothing may stay parked between tests: a held request still holds a permit, and a class whose
      * first failure poisons every later assertion tells you nothing about which one broke.
+     *
+     * <p>This is the <strong>test-to-test</strong> scope of the invariant only, and the distinction
+     * cost a Critical: a {@link FixedWindow} block is re-run inside one test method, so a block
+     * that parks a request has to give it back <em>itself</em> — this teardown is the backstop for
+     * an attempt that threw, never the release path for one that returned. Sealed over every
+     * wrapped block in the suite by
+     * {@code FixedWindowCoverageTest#everyWrappedBlockReturnsEveryPermitItTakesBeforeItEnds}.
      */
     @AfterEach
     void releaseEverything() throws Exception {
@@ -121,6 +130,17 @@ class PlanningConcurrencyTest extends LabelTestBase {
      */
     @Test
     @Timeout(60)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The refusal is the in-flight bulkhead: two integers in memory, no "
+                     + "clock on the path at all, and its Retry-After is the constant "
+                     + "ConcurrencyLimitedException.RETRY_AFTER_SECONDS. No fixed window in "
+                     + "this context can bind on this body: it spends 2 of "
+                     + "app.planning.requests-per-minute=4 for the holding principal and 1 "
+                     + "for the other - that dial is 4 and deliberately NOT wide, because "
+                     + "this class's own wrapped member has to exhaust it - and "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 covers the six "
+                     + "/api/auth/* paths, which this body never calls.")
     void aPlanningReadHoldsOnePermitAndTheCeilingIsPerPrincipal() throws Exception {
         var mine = newProject();
         var theirs = newProject();
@@ -149,6 +169,20 @@ class PlanningConcurrencyTest extends LabelTestBase {
      */
     @Test
     @Timeout(60)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The refusal is the in-flight bulkhead: two integers in memory, no "
+                     + "clock on the path at all, and its Retry-After is the constant "
+                     + "ConcurrencyLimitedException.RETRY_AFTER_SECONDS. No fixed window in "
+                     + "this context can bind on this body, and the margin is ONE request: "
+                     + "it spends 3 of app.planning.requests-per-minute=4 on one principal - "
+                     + "the held read, the bulkhead-refused read (the rate unit is spent "
+                     + "BEFORE the permit, which is this class's own "
+                     + "aBudgetRefusalIsAnsweredBeforeAnyPermitIsTaken) and the post-drain "
+                     + "read. A fourth read here would make the verdict depend on the "
+                     + "window, so add one only together with FixedWindow.inOneMinute. "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 covers the six "
+                     + "/api/auth/* paths, which this body never calls.")
     void permitsComeBackWhenTheHeldRequestFinishes() throws Exception {
         var ctx = newProject();
 
@@ -202,31 +236,45 @@ class PlanningConcurrencyTest extends LabelTestBase {
     @Test
     @Timeout(60)
     void aBudgetRefusalIsAnsweredBeforeAnyPermitIsTaken() throws Exception {
-        var exhausted = newProject();
-        var holderA = newProject();
-        var holderB = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var exhausted = newProject();
+            var holderA = newProject();
+            var holderB = newProject();
 
-        // Spend the whole planning budget of one principal on requests that complete.
-        for (int i = 0; i < 4; i++) {
-            backlog(exhausted).andExpect(status().isOk());
-        }
+            // Spend the whole planning budget of one principal on requests that complete.
+            for (int i = 0; i < 4; i++) {
+                backlog(exhausted).andExpect(status().isOk());
+            }
 
-        // Fill the surface with two OTHER principals, one permit each.
-        hold(backlogUri(holderA), holderA.token());
-        hold(backlogUri(holderB), holderB.token());
-        gate.awaitArrivals(2);
-        assertThat(limit.inFlight()).isEqualTo(2);
+            // Fill the surface with two OTHER principals, one permit each.
+            hold(backlogUri(holderA), holderA.token());
+            hold(backlogUri(holderB), holderB.token());
+            gate.awaitArrivals(2);
+            assertThat(limit.inFlight()).isEqualTo(2);
 
-        backlog(exhausted)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(jsonPath("$.errorType").doesNotExist());
+            backlog(exhausted)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(jsonPath("$.errorType").doesNotExist());
 
-        assertThat(limit.inFlight())
-                .as("a request the RATE budget refused must not have taken, waited for, or leaked "
-                    + "a permit — the ordering is PrincipalThrottleInterceptor's and is inherited, "
-                    + "not re-implemented here")
-                .isEqualTo(2);
+            assertThat(limit.inFlight())
+                    .as("a request the RATE budget refused must not have taken, waited for, or leaked "
+                        + "a permit — the ordering is PrincipalThrottleInterceptor's and is inherited, "
+                        + "not re-implemented here")
+                    .isEqualTo(2);
+
+            // A WRAPPED BLOCK RETURNS EVERY PERMIT IT TAKES BEFORE IT ENDS. Everything above
+            // this line was minted outside the attempt or parked inside it: two permits of a
+            // surface whose ceiling is 2, and a one-shot latch holding both requests on it. Left
+            // standing, attempt 2 opens against a full surface and its first read answers 429
+            // EXPENSIVE_SURFACE_BUSY - so the straddle the fixture exists to make INCONCLUSIVE
+            // becomes confident and wrong, accusing the interceptor ordering this member is
+            // about. @AfterEach states this invariant test-to-test; a retry needs it
+            // attempt-to-attempt, and only the block can hold it.
+            gate.open();
+            awaitDrained();
+            gate.reset();
+        });
     }
 
     /**
@@ -239,6 +287,17 @@ class PlanningConcurrencyTest extends LabelTestBase {
      */
     @Test
     @Timeout(60)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The refusal is the in-flight bulkhead: two integers in memory, no "
+                     + "clock on the path at all, and its Retry-After is the constant "
+                     + "ConcurrencyLimitedException.RETRY_AFTER_SECONDS. No fixed window in "
+                     + "this context can bind on this body: it spends 2 of "
+                     + "app.planning.requests-per-minute=4 on one principal (the held "
+                     + "section read and the refused aggregate, both on the one "
+                     + ".../backlog/** budget - which is the parity this member is about), "
+                     + "and app.rate-limit.auth-ip-requests-per-minute=1000 covers the six "
+                     + "/api/auth/* paths, which this body never calls.")
     void aSectionReadTakesAPermitFromTheSameShare() throws Exception {
         var ctx = newProject();
 

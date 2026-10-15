@@ -1,7 +1,10 @@
 package com.hamstrack.common.persistence;
 
+import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.ratelimit.RateLimitedException;
+import com.hamstrack.common.security.JwtService;
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -52,6 +55,31 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
     private static final int ATTEMPTS = 3;
 
     @Autowired private RateLimitService rateLimitService;
+    @Autowired private JwtService jwtService;
+
+    /**
+     * <strong>The fixture mints its tokens instead of logging in, because this is the one context
+     * in the suite whose auth budget is {@value #BUDGET}.</strong>
+     *
+     * <p>{@code LabelTestBase.login(User)} POSTs {@code /api/auth/login} and sets no remote
+     * address, and an unset {@code MockHttpServletRequest} reports
+     * {@code getRemoteAddr() = 127.0.0.1} (measured). That spends
+     * {@code RateLimitService.ipWindows["127.0.0.1"]} — a fixed epoch-minute window keyed on a
+     * literal no {@link FixedWindow} retry can re-key, inside a block that has two tokens to
+     * spend. It was safe only because the login is the block's first statement and a retry implies
+     * the roll that also replaced that window, i.e. by the "the body is short relative to its
+     * window" reasoning this ticket exists to delete.
+     *
+     * <p>Minting the token directly — the idiom the invite suites already use for the same reason —
+     * removes the spend rather than re-keying it, so no member of this class depends on the phase
+     * of a window it cannot name. The budget dial stays at {@value #BUDGET}: it is also the loop
+     * bound in {@link #theBudgetStillRefusesARealSequenceOfAttempts()}, so raising it would move
+     * the thing under test.
+     */
+    @Override
+    protected String login(User user) {
+        return jwtService.generateAccessToken(user);
+    }
 
     /**
      * The advice's half: no token, so the acquisition fails inside the controller's transaction and
@@ -60,7 +88,13 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
     @Test
     @Timeout(180)
     void a503AnsweredByTheHandlerDoesNotSpendTheCallersAuthBudget() throws Exception {
-        assertEveryAttemptIsRefusedByThePoolAndNotByTheBudget("10.233.0.1", null);
+        // Guarded although it asserts no 429 — because that is exactly what it asserts. Three
+        // requests from one address against a budget of two, demanding "no 429 in here": a roll
+        // between the second and the third makes that true whether or not the refund exists. This
+        // body and its sibling are the two slowest budget-spending blocks in the whole category
+        // (3.033 s and 3.808 s, measured), so this is its largest false-green exposure.
+        FixedWindow.inOneMinute(attempt ->
+                assertEveryAttemptIsRefusedByThePoolAndNotByTheBudget(attempt, "10.233.4.", null));
     }
 
     /**
@@ -74,8 +108,10 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
     @Test
     @Timeout(180)
     void a503AnsweredByTheFilterDoesNotSpendTheCallersAuthBudgetEither() throws Exception {
-        var ctx = newProject();
-        assertEveryAttemptIsRefusedByThePoolAndNotByTheBudget("10.233.0.2", ctx.token());
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
+            assertEveryAttemptIsRefusedByThePoolAndNotByTheBudget(attempt, "10.233.5.", ctx.token());
+        });
     }
 
     /**
@@ -87,21 +123,32 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
     @Test
     @Timeout(120)
     void theBudgetStillRefusesARealSequenceOfAttempts() throws Exception {
-        var ip = "10.233.0.3";
-        for (int i = 0; i < Integer.parseInt(BUDGET); i++) {
-            assertThat(login(ip, null).getStatus())
-                    .as("a wrong password is an attempt, and an attempt spends budget")
-                    .isEqualTo(401);
-        }
+        // The class that owned the only working roll mitigation did not apply it to this member
+        // (HD-334): the window is spent over HTTP at a literal address, and a roll before the last
+        // request turns the 429 into a 401. Both keys vary per attempt — the address because the
+        // window is keyed on it, and the e-mail because a wrong password is RECORDED against the
+        // address (deliberately, so the limiter cannot be used to probe which addresses exist), so
+        // a retry reusing it would cross login-failure-threshold and answer 429 from the backoff
+        // where the first two assertions want 401.
+        FixedWindow.inOneMinute(attempt -> {
+            var ip = "10.233.3." + attempt.suffix();
+            var email = inbox("10.233.3.", attempt);
+            for (int i = 0; i < Integer.parseInt(BUDGET); i++) {
+                assertThat(login(ip, null, email).getStatus())
+                        .as("a wrong password is an attempt, and an attempt spends budget")
+                        .isEqualTo(401);
+            }
 
-        assertThat(login(ip, null).getStatus())
-                .as("""
-                    THE PER-IP BUDGET MUST STILL BE ENFORCED.
+            assertThat(login(ip, null, email).getStatus())
+                    .as("""
+                        THE PER-IP BUDGET MUST STILL BE ENFORCED.
 
-                    The refund exists for a status the INSTANCE produced about its own state. If it \
-                    ever widens to a refusal the CALLER earned, the brute-force bound on the most \
-                    attacked endpoint in the product is gone and nothing else replaces it.""")
-                .isEqualTo(429);
+                        The refund exists for a status the INSTANCE produced about its own state. \
+                        If it ever widens to a refusal the CALLER earned, the brute-force bound on \
+                        the most attacked endpoint in the product is gone and nothing else \
+                        replaces it.""")
+                    .isEqualTo(429);
+        });
     }
 
     /**
@@ -120,14 +167,15 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
      *
      * <p>Driven through the service rather than over HTTP on purpose: this is arithmetic about a
      * fixed window, and {@value #BUDGET}-plus-refunds worth of starved HTTP requests would take
-     * seconds and could straddle a minute boundary. The loop below re-runs on a fresh key if the
-     * window rolls under it, so nothing here is decided by the clock.
+     * seconds and could straddle a minute boundary. {@link FixedWindow} discards an attempt the
+     * window rolled under and re-runs it on a fresh key, so nothing here is decided by the clock.
      */
     @Test
-    void theRefundIsCappedAtOneBudgetPerWindowSoAFloodStillMeetsACeiling() {
+    void theRefundIsCappedAtOneBudgetPerWindowSoAFloodStillMeetsACeiling() throws Exception {
         int budget = Integer.parseInt(BUDGET);
 
-        withinOneWindow("10.233.1.", ip -> {
+        FixedWindow.inOneMinute(attempt -> {
+            var ip = "10.233.1." + attempt.suffix();
             // Twice the budget, every one of them refunded on the way out. Only the first BUDGET
             // refunds are honoured, so this leaves the window with BUDGET tokens spent.
             for (int i = 0; i < 2 * budget; i++) {
@@ -157,10 +205,11 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
      * earlier.
      */
     @Test
-    void aRefundIntoAWindowTheTokenWasNeverChargedToIsIgnored() {
+    void aRefundIntoAWindowTheTokenWasNeverChargedToIsIgnored() throws Exception {
         int budget = Integer.parseInt(BUDGET);
 
-        withinOneWindow("10.233.2.", ip -> {
+        FixedWindow.inOneMinute(attempt -> {
+            var ip = "10.233.2." + attempt.suffix();
             long charged = rateLimitService.checkAuthRequestAllowed(ip);
             rateLimitService.refundAuthRequest(ip, charged - 1);
 
@@ -182,34 +231,14 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
         });
     }
 
-    /**
-     * Runs {@code body} against a key nothing else has touched, retrying on a fresh key if the
-     * epoch minute rolled while it ran. The window is wall-clock and the body is microseconds of
-     * arithmetic, so this is a formality — but a formality is cheaper than a test that fails once a
-     * month at the top of a minute and is then believed to be flaky rather than right.
-     */
-    private void withinOneWindow(String ipPrefix, java.util.function.Consumer<String> body) {
-        for (int attempt = 1; ; attempt++) {
-            long before = java.time.Instant.now().getEpochSecond() / 60;
-            var ip = ipPrefix + attempt;
-            try {
-                body.accept(ip);
-            } catch (AssertionError e) {
-                if (java.time.Instant.now().getEpochSecond() / 60 != before && attempt < 5) {
-                    continue;
-                }
-                throw e;
-            }
-            return;
-        }
-    }
-
-    private void assertEveryAttemptIsRefusedByThePoolAndNotByTheBudget(String ip, String token)
-            throws Exception {
+    private void assertEveryAttemptIsRefusedByThePoolAndNotByTheBudget(
+            FixedWindow.Attempt attempt, String ipPrefix, String token) throws Exception {
+        var ip = ipPrefix + attempt.suffix();
+        var email = inbox(ipPrefix, attempt);
         var statuses = whileTheWholePoolIsHeld(() -> {
             var seen = new ArrayList<Integer>();
             for (int i = 0; i < ATTEMPTS; i++) {
-                seen.add(login(ip, token).getStatus());
+                seen.add(login(ip, token, email).getStatus());
             }
             return List.copyOf(seen);
         });
@@ -227,11 +256,28 @@ class DatabaseBusyAuthBudgetTest extends PoolStarvedBase {
                 .containsOnly(503);
     }
 
-    private MockHttpServletResponse login(String ip, String token) throws Exception {
+    /**
+     * The address a wrong password is recorded against, varied by <strong>member as well as by
+     * attempt</strong> — one derivation, used by every member that needs one.
+     *
+     * <p>{@code attempt.suffix()} alone is not a key: it made three members in this one context
+     * share {@code nobody-1@example.com} while their IPs sat in separate /24s, and that was safe
+     * only by an ordering inside {@code AuthService} that nothing asserts (the pool-starved halves
+     * answer 503 from the connection acquisition in {@code findByEmail}, which is after the
+     * in-memory {@code checkLoginAllowed} and before {@code recordLoginFailure}, so a starved
+     * attempt records no failure at all). Derive it from the member's own prefix and the safety is
+     * a property of the key instead: {@code login-failure-threshold} is per address, so no member
+     * can spend another's.
+     */
+    private static String inbox(String ipPrefix, FixedWindow.Attempt attempt) {
+        return "nobody-" + ipPrefix.replace('.', '-') + attempt.suffix() + "@example.com";
+    }
+
+    private MockHttpServletResponse login(String ip, String token, String email) throws Exception {
         var request = post("/api/auth/login")
                 .with(r -> { r.setRemoteAddr(ip); return r; })
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"email\":\"nobody@example.com\",\"password\":\"whatever\"}");
+                .content("{\"email\":\"" + email + "\",\"password\":\"whatever\"}");
         if (token != null) {
             request = request.header("Authorization", "Bearer " + token);
         }

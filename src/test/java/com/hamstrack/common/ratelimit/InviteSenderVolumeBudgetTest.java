@@ -2,8 +2,9 @@ package com.hamstrack.common.ratelimit;
 
 import com.hamstrack.common.config.InviteProperties;
 import com.hamstrack.common.config.RateLimitProperties;
-import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.RateLimitKind;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -52,34 +53,36 @@ class InviteSenderVolumeBudgetTest {
      * refusal that lies about its own remedy is how a retryable 429 gets read as a wall.
      */
     @Test
-    void theHourlyWindowRefusesAtItsCeilingAndNamesTheRoll() {
-        var metrics = mock(ProductMetrics.class);
-        var budget = budget(3, UNBOUNDED, metrics);
-        var sender = UUID.randomUUID();
+    void theHourlyWindowRefusesAtItsCeilingAndNamesTheRoll() throws Exception {
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var metrics = mock(ProductMetrics.class);
+            var budget = budget(3, UNBOUNDED, metrics);
+            var sender = UUID.randomUUID();
 
-        for (int i = 0; i < 3; i++) {
-            int spend = i + 1;
-            assertThatCode(() -> budget.require(sender))
-                    .as("send %d of 3 is inside the allowance", spend)
-                    .doesNotThrowAnyException();
-        }
+            for (int i = 0; i < 3; i++) {
+                int spend = i + 1;
+                assertThatCode(() -> budget.require(sender))
+                        .as("send %d of 3 is inside the allowance", spend)
+                        .doesNotThrowAnyException();
+            }
 
-        var refusal = refuse(budget, sender, 3600);
+            var refusal = refuse(budget, sender, 3600);
 
-        assertThat(refusal.getMessage())
-                .as("the reader is an admin mid-onboarding: name both allowances, name the wait, "
-                    + "and — the sentence that matters in practice — stop them re-sending the "
-                    + "invitations that already went out")
-                .contains("3 invitations an hour")
-                .contains(UNBOUNDED + " a day")
-                .contains("already sent are unaffected");
-        assertThat(refusal.getMessage())
-                .as("a refusal may only prescribe an action its reader can perform, and 'ask an "
-                    + "administrator to raise the limit' is not one on Cloud, where there is no "
-                    + "administrator to ask, nor on DC, where the reader may not be the operator")
-                .doesNotContain("administrator");
+            assertThat(refusal.getMessage())
+                    .as("the reader is an admin mid-onboarding: name both allowances, name the wait, "
+                        + "and — the sentence that matters in practice — stop them re-sending the "
+                        + "invitations that already went out")
+                    .contains("3 invitations an hour")
+                    .contains(UNBOUNDED + " a day")
+                    .contains("already sent are unaffected");
+            assertThat(refusal.getMessage())
+                    .as("a refusal may only prescribe an action its reader can perform, and 'ask an "
+                        + "administrator to raise the limit' is not one on Cloud, where there is no "
+                        + "administrator to ask, nor on DC, where the reader may not be the operator")
+                    .doesNotContain("administrator");
 
-        verify(metrics, times(1)).rateLimitHit(RateLimitKind.INVITE_SENDER_VOLUME);
+            verify(metrics, times(1)).rateLimitHit(RateLimitKind.INVITE_SENDER_VOLUME);
+        });
     }
 
     /**
@@ -90,17 +93,19 @@ class InviteSenderVolumeBudgetTest {
      * SPA renders it as a duration rather than as a countdown.
      */
     @Test
-    void theDailyWindowBindsIndependentlyOfTheHourly() {
-        var budget = budget(UNBOUNDED, 2, mock(ProductMetrics.class));
-        var sender = UUID.randomUUID();
+    void theDailyWindowBindsIndependentlyOfTheHourly() throws Exception {
+        FixedWindow.inOne(FixedWindow.Unit.DAY, attempt -> {
+            var budget = budget(UNBOUNDED, 2, mock(ProductMetrics.class));
+            var sender = UUID.randomUUID();
 
-        budget.require(sender);
-        budget.require(sender);
+            budget.require(sender);
+            budget.require(sender);
 
-        // The DAILY window's roll, not the hour's. If the daily ceiling were merely a multiple of
-        // the hourly it could not be reached with the hourly one wide open, and the quota control
-        // — the only one of the three that protects a monthly provider allowance — would not exist.
-        refuse(budget, sender, 86_400);
+            // The DAILY window's roll, not the hour's. If the daily ceiling were merely a multiple of
+            // the hourly it could not be reached with the hourly one wide open, and the quota control
+            // — the only one of the three that protects a monthly provider allowance — would not exist.
+            refuse(budget, sender, 86_400);
+        });
     }
 
     /**
@@ -116,21 +121,23 @@ class InviteSenderVolumeBudgetTest {
      */
     @Test
     void aRefusedRequestDoesNotSpendTheOtherWindow() throws Exception {
-        var budget = budget(2, 50, mock(ProductMetrics.class));
-        var sender = UUID.randomUUID();
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var budget = budget(2, 50, mock(ProductMetrics.class));
+            var sender = UUID.randomUUID();
 
-        budget.require(sender);
-        budget.require(sender);
-        for (int i = 0; i < 10; i++) {
-            assertThatThrownBy(() -> budget.require(sender))
-                    .isInstanceOf(RateLimitedException.class);
-        }
+            budget.require(sender);
+            budget.require(sender);
+            for (int i = 0; i < 10; i++) {
+                assertThatThrownBy(() -> budget.require(sender))
+                        .isInstanceOf(RateLimitedException.class);
+            }
 
-        assertThat(dayCountOf(budget, sender))
-                .as("ten refused retries must leave the DAY where the two accepted sends left it. "
-                    + "Incrementing before checking would have this at 12, and an admin who "
-                    + "hammered a one-hour refusal would find themselves locked out until midnight")
-                .isEqualTo(2);
+            assertThat(dayCountOf(budget, sender))
+                    .as("ten refused retries must leave the DAY where the two accepted sends left it. "
+                        + "Incrementing before checking would have this at 12, and an admin who "
+                        + "hammered a one-hour refusal would find themselves locked out until midnight")
+                    .isEqualTo(2);
+        });
     }
 
     /**
@@ -182,17 +189,19 @@ class InviteSenderVolumeBudgetTest {
 
     /** One sender's budget is their own; exhausting it must not refuse anybody else. */
     @Test
-    void theBudgetIsPerPrincipal() {
-        var budget = budget(1, UNBOUNDED, mock(ProductMetrics.class));
-        var first = UUID.randomUUID();
+    void theBudgetIsPerPrincipal() throws Exception {
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var budget = budget(1, UNBOUNDED, mock(ProductMetrics.class));
+            var first = UUID.randomUUID();
 
-        budget.require(first);
-        assertThatThrownBy(() -> budget.require(first)).isInstanceOf(RateLimitedException.class);
+            budget.require(first);
+            assertThatThrownBy(() -> budget.require(first)).isInstanceOf(RateLimitedException.class);
 
-        assertThatCode(() -> budget.require(UUID.randomUUID()))
-                .as("keyed on the principal, so one abusive account cannot deny invitations to "
-                    + "every other admin on the instance — the failure mode an IP key has")
-                .doesNotThrowAnyException();
+            assertThatCode(() -> budget.require(UUID.randomUUID()))
+                    .as("keyed on the principal, so one abusive account cannot deny invitations to "
+                        + "every other admin on the instance — the failure mode an IP key has")
+                    .doesNotThrowAnyException();
+        });
     }
 
     // ------------------------------------------------------------------ fixture

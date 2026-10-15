@@ -2,6 +2,8 @@ package com.hamstrack.report;
 
 import com.hamstrack.common.ratelimit.ConcurrencyLimitedException;
 import com.hamstrack.common.ratelimit.ExpensiveReadConcurrencyLimit;
+import com.hamstrack.common.testsupport.FixedWindow;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import com.hamstrack.issue.LabelTestBase;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.servlet.http.HttpServletRequest;
@@ -130,6 +132,18 @@ class ExpensiveReadConcurrencyTest extends LabelTestBase {
      */
     @Test
     @Timeout(60)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The refusal is the in-flight bulkhead: two integers in memory, no "
+                     + "clock on the path at all, and its Retry-After is the constant "
+                     + "ConcurrencyLimitedException.RETRY_AFTER_SECONDS. No fixed window in "
+                     + "this context can bind on this body: every request in it is on "
+                     + ".../reports/flow and spends 3 of app.reports.requests-per-minute="
+                     + "10000 for one principal and 1 for the other. "
+                     + "app.search.requests-per-minute=2 is tight on purpose but belongs to "
+                     + "the insights route this body never calls, and "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 covers the six "
+                     + "/api/auth/* paths.")
     void oneMorePersonalRequestIsRefusedWhileADifferentPrincipalIsAdmitted() throws Exception {
         var mine = newProject();
         var theirs = newProject();
@@ -172,6 +186,18 @@ class ExpensiveReadConcurrencyTest extends LabelTestBase {
      */
     @Test
     @Timeout(60)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The refusal is the in-flight bulkhead: two integers in memory, no "
+                     + "clock on the path at all, and its Retry-After is the constant "
+                     + "ConcurrencyLimitedException.RETRY_AFTER_SECONDS. No fixed window in "
+                     + "this context can bind on this body: every request in it is on "
+                     + ".../reports/flow and it spends 1 of app.reports.requests-per-minute="
+                     + "10000 per principal, one each for four principals. "
+                     + "app.search.requests-per-minute=2 is tight on purpose but belongs to "
+                     + "the insights route this body never calls, and "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 covers the six "
+                     + "/api/auth/* paths.")
     void aFullSurfaceRefusesAPrincipalHoldingNothing() throws Exception {
         var first = newProject();
         var second = newProject();
@@ -215,6 +241,18 @@ class ExpensiveReadConcurrencyTest extends LabelTestBase {
      */
     @Test
     @Timeout(60)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The refusal is the in-flight bulkhead: two integers in memory, no "
+                     + "clock on the path at all, and its Retry-After is the constant "
+                     + "ConcurrencyLimitedException.RETRY_AFTER_SECONDS. No fixed window in "
+                     + "this context can bind on this body: every request in it is on "
+                     + ".../reports/flow and it spends 6 of app.reports.requests-per-minute="
+                     + "10000 on one principal, three orders of magnitude inside the dial. "
+                     + "app.search.requests-per-minute=2 is tight on purpose but belongs to "
+                     + "the insights route this body never calls, and "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 covers the six "
+                     + "/api/auth/* paths.")
     void permitsComeBackWhenTheHeldRequestsFinish() throws Exception {
         var ctx = newProject();
 
@@ -277,21 +315,23 @@ class ExpensiveReadConcurrencyTest extends LabelTestBase {
     @Test
     @Timeout(60)
     void aRefusalFromTheSECONDInterceptorStillReturnsTheFIRSTOnesPermit() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        insights(ctx).andExpect(status().isOk());
-        insights(ctx).andExpect(status().isOk());
+            insights(ctx).andExpect(status().isOk());
+            insights(ctx).andExpect(status().isOk());
 
-        insights(ctx)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(jsonPath("$.errorType").doesNotExist());
+            insights(ctx)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(jsonPath("$.errorType").doesNotExist());
 
-        assertThat(limit.inFlight())
-                .as("the reports interceptor took a permit and the SEARCH budget then refused the "
-                    + "request; if afterCompletion did not run for an interceptor that never saw "
-                    + "the handler, this is where the leak would be")
-                .isZero();
-        report(flow(ctx), ctx.token()).andExpect(status().isOk());
+            assertThat(limit.inFlight())
+                    .as("the reports interceptor took a permit and the SEARCH budget then refused the "
+                        + "request; if afterCompletion did not run for an interceptor that never saw "
+                        + "the handler, this is where the leak would be")
+                    .isZero();
+            report(flow(ctx), ctx.token()).andExpect(status().isOk());
+        });
     }
 
     /**

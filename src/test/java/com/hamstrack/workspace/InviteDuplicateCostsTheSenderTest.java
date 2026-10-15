@@ -1,5 +1,6 @@
 package com.hamstrack.workspace;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
@@ -99,38 +100,40 @@ class InviteDuplicateCostsTheSenderTest {
      */
     @Test
     void everyDuplicateRefusalSpendsAUnitOfTheCallersOwnHourlyVolume() throws Exception {
-        var admin = user();
-        var workspace = workspaceOwnedBy(admin);
-        var alice = address("alice");
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var admin = user();
+            var workspace = workspaceOwnedBy(admin);
+            var alice = address("alice");
 
-        invite(admin, workspace, alice).andExpect(status().isCreated());
-        for (int i = 2; i <= HOURLY; i++) {
-            var repeat = invite(admin, workspace, alice).andExpect(status().isConflict());
-            assertThat(errorTypeOf(repeat))
-                    .as("request %d must be the duplicate refusal — if it were anything else this "
-                        + "test would be counting the wrong thing", i)
-                    .isEqualTo("DUPLICATE_INVITE");
-        }
+            invite(admin, workspace, alice).andExpect(status().isCreated());
+            for (int i = 2; i <= HOURLY; i++) {
+                var repeat = invite(admin, workspace, alice).andExpect(status().isConflict());
+                assertThat(errorTypeOf(repeat))
+                        .as("request %d must be the duplicate refusal — if it were anything else this "
+                            + "test would be counting the wrong thing", i)
+                        .isEqualTo("DUPLICATE_INVITE");
+            }
 
-        var fresh = address("bob");
-        var refusal = invite(admin, workspace, fresh)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            var fresh = address("bob");
+            var refusal = invite(admin, workspace, fresh)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        assertThat(detailOf(refusal))
-                .as("""
-                        THE ADDRESS IS FRESH, SO THIS 429 HAS EXACTLY ONE POSSIBLE SOURCE. Nobody \
-                        has ever mailed it: the (sender, recipient) cooldown sees no earlier send \
-                        and the recipient's daily cap is empty. Only the caller's own hourly \
-                        volume can refuse — and it is full only because the two duplicate 409s \
-                        above each spent a unit. Asserting the wording as well as the status is \
-                        what stops a future ceiling from quietly satisfying this test for a \
-                        different reason.""")
-                .contains(String.valueOf(HOURLY))
-                .contains("Invitation limit reached");
-        assertThat(inviteRowsFor(fresh))
-                .as("and it really was refused: a 429 leaves no invitation behind")
-                .isZero();
+            assertThat(detailOf(refusal))
+                    .as("""
+                            THE ADDRESS IS FRESH, SO THIS 429 HAS EXACTLY ONE POSSIBLE SOURCE. Nobody \
+                            has ever mailed it: the (sender, recipient) cooldown sees no earlier send \
+                            and the recipient's daily cap is empty. Only the caller's own hourly \
+                            volume can refuse — and it is full only because the two duplicate 409s \
+                            above each spent a unit. Asserting the wording as well as the status is \
+                            what stops a future ceiling from quietly satisfying this test for a \
+                            different reason.""")
+                    .contains(String.valueOf(HOURLY))
+                    .contains("Invitation limit reached");
+            assertThat(inviteRowsFor(fresh))
+                    .as("and it really was refused: a 429 leaves no invitation behind")
+                    .isZero();
+        });
     }
 
     /**
@@ -148,28 +151,30 @@ class InviteDuplicateCostsTheSenderTest {
      */
     @Test
     void aCallerOutOfVolumeIsToldAboutTheirOwnBudgetAndNotAboutThePendingRow() throws Exception {
-        var admin = user();
-        var workspace = workspaceOwnedBy(admin);
-        var pending = address("pending");
+        FixedWindow.inOne(FixedWindow.Unit.HOUR, attempt -> {
+            var admin = user();
+            var workspace = workspaceOwnedBy(admin);
+            var pending = address("pending");
 
-        invite(admin, workspace, pending).andExpect(status().isCreated());
-        for (int i = 2; i <= HOURLY; i++) {
-            invite(admin, workspace, address("filler-" + i)).andExpect(status().isCreated());
-        }
+            invite(admin, workspace, pending).andExpect(status().isCreated());
+            for (int i = 2; i <= HOURLY; i++) {
+                invite(admin, workspace, address("filler-" + i)).andExpect(status().isCreated());
+            }
 
-        var refusal = invite(admin, workspace, pending)
-                .andExpect(status().isTooManyRequests());
+            var refusal = invite(admin, workspace, pending)
+                    .andExpect(status().isTooManyRequests());
 
-        assertThat(detailOf(refusal))
-                .as("the caller is over their hourly volume and re-inviting a pending address at "
-                    + "the same time. The volume ceiling answers first, so the refusal describes "
-                    + "the caller's own budget and says nothing about the row")
-                .contains("Invitation limit reached")
-                .doesNotContain("withdraw")
-                .doesNotContain("waiting in this workspace");
-        assertThat(errorTypeOf(refusal))
-                .as("and it is not the duplicate refusal wearing a different status")
-                .isNotEqualTo("DUPLICATE_INVITE");
+            assertThat(detailOf(refusal))
+                    .as("the caller is over their hourly volume and re-inviting a pending address at "
+                        + "the same time. The volume ceiling answers first, so the refusal describes "
+                        + "the caller's own budget and says nothing about the row")
+                    .contains("Invitation limit reached")
+                    .doesNotContain("withdraw")
+                    .doesNotContain("waiting in this workspace");
+            assertThat(errorTypeOf(refusal))
+                    .as("and it is not the duplicate refusal wearing a different status")
+                    .isNotEqualTo("DUPLICATE_INVITE");
+        });
     }
 
     // ================================================================ fixture

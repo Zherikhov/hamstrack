@@ -1,5 +1,6 @@
 package com.hamstrack.report;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -46,28 +47,30 @@ class InsightsThrottleTest extends InsightsTestBase {
 
     @Test
     void insightsIsThrottledAndTheRefusalArrivesBeforeTenancy() throws Exception {
-        var mine = newProject();
-        var theirs = newProject();   // its own workspace, its own owner
+        FixedWindow.inOneMinute(attempt -> {
+            var mine = newProject();
+            var theirs = newProject();   // its own workspace, its own owner
 
-        // Three probes at a workspace I am not a member of: 404 every time, and each still costs
-        // me a unit of my own budget.
-        for (int i = 0; i < 3; i++) {
+            // Three probes at a workspace I am not a member of: 404 every time, and each still costs
+            // me a unit of my own budget.
+            for (int i = 0; i < 3; i++) {
+                insights(theirs.wsId(), mine.token(), "", null, "STATUS", null)
+                        .andExpect(status().isNotFound());
+            }
+
             insights(theirs.wsId(), mine.token(), "", null, "STATUS", null)
-                    .andExpect(status().isNotFound());
-        }
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        insights(theirs.wsId(), mine.token(), "", null, "STATUS", null)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            // Identical for a workspace that does not exist at all, so the 429 cannot be read as
+            // "that one was real".
+            insights(UUID.randomUUID(), mine.token(), "", null, "STATUS", null)
+                    .andExpect(status().isTooManyRequests());
 
-        // Identical for a workspace that does not exist at all, so the 429 cannot be read as
-        // "that one was real".
-        insights(UUID.randomUUID(), mine.token(), "", null, "STATUS", null)
-                .andExpect(status().isTooManyRequests());
-
-        // A scan against you must never throttle you.
-        insights(theirs.wsId(), theirs.token(), "", null, "STATUS", null)
-                .andExpect(status().isOk());
+            // A scan against you must never throttle you.
+            insights(theirs.wsId(), theirs.token(), "", null, "STATUS", null)
+                    .andExpect(status().isOk());
+        });
     }
 
     /**
@@ -77,17 +80,19 @@ class InsightsThrottleTest extends InsightsTestBase {
      */
     @Test
     void insightsSharesTheOneReportBudgetWithTheProjectReports() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        insights(ctx.wsId(), ctx.token(), "", null, "STATUS", null).andExpect(status().isOk());
-        insights(ctx.wsId(), ctx.token(), "", null, "TYPE", null).andExpect(status().isOk());
-        mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId()
-                        + "/reports/aging")
-                        .header("Authorization", "Bearer " + ctx.token()))
-                .andExpect(status().isOk());
+            insights(ctx.wsId(), ctx.token(), "", null, "STATUS", null).andExpect(status().isOk());
+            insights(ctx.wsId(), ctx.token(), "", null, "TYPE", null).andExpect(status().isOk());
+            mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId()
+                            + "/reports/aging")
+                            .header("Authorization", "Bearer " + ctx.token()))
+                    .andExpect(status().isOk());
 
-        insights(ctx.wsId(), ctx.token(), "", null, "PRIORITY", null)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            insights(ctx.wsId(), ctx.token(), "", null, "PRIORITY", null)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 }

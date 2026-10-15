@@ -1,5 +1,6 @@
 package com.hamstrack.ratelimit;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,17 +43,24 @@ class AuthRateLimitForwardedForTrustedTest {
 
     @Test
     void fixedRightmostXffTripsLimitEvenAsSocketVaries() throws Exception {
-        // Trusted proxy: the rightmost XFF entry is the real peer. Keep it fixed
-        // while the socket varies — all share one bucket, 6th trips. The
-        // client-supplied left entry must be ignored (rightmost wins).
-        var realPeer = "198.51.100.4";
-        for (int i = 0; i < 5; i++) {
-            loginTrusted("10.0.0." + i, "1.2.3.4, " + realPeer)
-                    .andExpect(status().isUnauthorized());
-        }
-        loginTrusted("10.0.0.250", "5.6.7.8, " + realPeer)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+        // RateLimitService's per-IP window is a fixed epoch minute, and the key here is the
+        // rightmost XFF entry — so the retry varies that, in a /24 of its own. Each member of this
+        // class owns a /24, because RateLimitService.ipWindows is an instance field of a bean and
+        // therefore per-CONTEXT state that no test resets: an address one member has spent is spent
+        // for every member sharing the context, whatever order JUnit runs them in.
+        FixedWindow.inOneMinute(attempt -> {
+            // Trusted proxy: the rightmost XFF entry is the real peer. Keep it fixed
+            // while the socket varies — all share one bucket, 6th trips. The
+            // client-supplied left entry must be ignored (rightmost wins).
+            var realPeer = "198.51.101." + attempt.suffix();
+            for (int i = 0; i < 5; i++) {
+                loginTrusted("10.0.0." + i, "1.2.3.4, " + realPeer)
+                        .andExpect(status().isUnauthorized());
+            }
+            loginTrusted("10.0.0.250", "5.6.7.8, " + realPeer)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 
     /**
@@ -80,27 +88,33 @@ class AuthRateLimitForwardedForTrustedTest {
      * that freedom is MockMvc's, not a client's — so per-socket keying is not the failure
      * being modelled here. One key for everybody is.
      *
-     * <p>The addresses are not the {@code .4}/{@code .9} of the spec, and the reason is
-     * worth knowing before you "restore" them: the sibling test in this class exhausts
-     * {@code 198.51.100.4} in the same Spring context, and {@code RateLimitService}'s
-     * per-minute windows are process state that no test resets. Reusing that address would
-     * make this test pass or fail on JUnit's method order.
+     * <p>The addresses are not the {@code .4}/{@code .9} of the spec, and the property is
+     * worth knowing before you "restore" them: every member of this class keys its burst in a
+     * /24 of its own, because {@code RateLimitService.ipWindows} is an instance field of a bean
+     * and so per-context state that no test resets. An address another member has already spent
+     * would make this test pass or fail on JUnit's method order — and a sentence naming which
+     * addresses those are goes stale the next time one of them is re-keyed, which is exactly what
+     * happened to the two sentences this one replaces (HD-334).
      */
     @Test
     void distinctRightmostXffGetIndependentBudgets() throws Exception {
-        var exhausted = "198.51.100.44";
-        var fresh = "198.51.100.99";
-        var socket = "10.0.0.7";
+        FixedWindow.inOneMinute(attempt -> {
+            // Two addresses per attempt, in two /24s of their own — see the sibling above for why
+            // the retry may not reuse an address this context has already spent.
+            var exhausted = "198.51.102." + attempt.suffix();
+            var fresh = "198.51.103." + attempt.suffix();
+            var socket = "10.0.0.7";
 
-        for (int i = 0; i < 5; i++) {
-            loginTrusted(socket, "1.2.3.4, " + exhausted).andExpect(status().isUnauthorized());
-        }
-        loginTrusted(socket, "1.2.3.4, " + exhausted)
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            for (int i = 0; i < 5; i++) {
+                loginTrusted(socket, "1.2.3.4, " + exhausted).andExpect(status().isUnauthorized());
+            }
+            loginTrusted(socket, "1.2.3.4, " + exhausted)
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        // Same socket, same left entry, different real peer: a budget of its own.
-        loginTrusted(socket, "1.2.3.4, " + fresh).andExpect(status().isUnauthorized());
+            // Same socket, same left entry, different real peer: a budget of its own.
+            loginTrusted(socket, "1.2.3.4, " + fresh).andExpect(status().isUnauthorized());
+        });
     }
 
     private ResultActions loginTrusted(String socket, String xff) throws Exception {

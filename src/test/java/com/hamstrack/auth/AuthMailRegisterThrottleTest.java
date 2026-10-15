@@ -3,6 +3,7 @@ package com.hamstrack.auth;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.PersistenceContext;
 import org.junit.jupiter.api.Test;
@@ -99,6 +100,16 @@ class AuthMailRegisterThrottleTest {
      * the per-inbox cooldown on {@code EmailType.REGISTRATION_VERIFICATION}.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecordWhereEndpointDiscloses",
+            reason = "RecipientMailThrottle counts over now.minus(policy.cooldown()) and "
+                     + "now.minus(policy.ceilingWindow()), both DB-backed and both sliding, so "
+                     + "no boundary resets anything and a delay can only strengthen the "
+                     + "refusal. The one FIXED window on this path is the per-IP auth budget, "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 - set that high here "
+                     + "on purpose, as the comment beside it says, so that it is never what "
+                     + "refuses. This body sends 2 registers from one forwarded address; the "
+                     + "whole class shares that key and the context.")
     void aSecondSpellingOfOneInboxIsRefusedRatherThanMailed() throws Exception {
         var inbox = "hd202reg-" + UUID.randomUUID().toString().replace("-", "");
 
@@ -124,6 +135,16 @@ class AuthMailRegisterThrottleTest {
      * neither fast nor reliable. What is left refusing at the end is the cap.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecordWhereEndpointDiscloses",
+            reason = "RecipientMailThrottle counts over now.minus(policy.cooldown()) and "
+                     + "now.minus(policy.ceilingWindow()), both DB-backed and both sliding, so "
+                     + "no boundary resets anything and a delay can only strengthen the "
+                     + "refusal. The one FIXED window on this path is the per-IP auth budget, "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 - set that high here "
+                     + "on purpose, as the comment beside it says, so that it is never what "
+                     + "refuses. This body sends CAP + 1 = 6 registers from one forwarded "
+                     + "address; the whole class shares that key and the context.")
     void aPacedAttackIsStoppedByTheVolumeCap() throws Exception {
         var inbox = "hd202paced-" + UUID.randomUUID().toString().replace("-", "");
 
@@ -150,6 +171,16 @@ class AuthMailRegisterThrottleTest {
      * unbounded and the {@code +tag} half of the fold insufficient on its own.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecordWhereEndpointDiscloses",
+            reason = "RecipientMailThrottle counts over now.minus(policy.cooldown()) and "
+                     + "now.minus(policy.ceilingWindow()), both DB-backed and both sliding, so "
+                     + "no boundary resets anything and a delay can only strengthen the "
+                     + "refusal. The one FIXED window on this path is the per-IP auth budget, "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 - set that high here "
+                     + "on purpose, as the comment beside it says, so that it is never what "
+                     + "refuses. This body sends 2 registers from one forwarded address; the "
+                     + "whole class shares that key and the context.")
     void aDotFoldedSpellingSpendsTheSameRegistrationBudget() throws Exception {
         // Short on purpose: @Email holds the local part to RFC 5321's 64 octets, and interleaving
         // dots DOUBLES its length — a full UUID here is a 79-character local part and a 400 that
@@ -174,6 +205,16 @@ class AuthMailRegisterThrottleTest {
      * told it had been sent. Refusing above the INSERT strands nothing at all.
      */
     @Test
+    @NoFixedWindow(why = NoFixedWindow.Why.SLIDING_WINDOW,
+            refusedBy = "RecipientMailThrottle.requireAndRecordWhereEndpointDiscloses",
+            reason = "RecipientMailThrottle counts over now.minus(policy.cooldown()) and "
+                     + "now.minus(policy.ceilingWindow()), both DB-backed and both sliding, so "
+                     + "no boundary resets anything and a delay can only strengthen the "
+                     + "refusal. The one FIXED window on this path is the per-IP auth budget, "
+                     + "app.rate-limit.auth-ip-requests-per-minute=1000 - set that high here "
+                     + "on purpose, as the comment beside it says, so that it is never what "
+                     + "refuses. This body sends 2 registers from one forwarded address; the "
+                     + "whole class shares that key and the context.")
     void aRefusedRegistrationLeavesNoAccountBehind() throws Exception {
         var inbox = "hd202none-" + UUID.randomUUID().toString().replace("-", "");
         register(inbox + "+1@gmail.com").andExpect(status().isCreated());

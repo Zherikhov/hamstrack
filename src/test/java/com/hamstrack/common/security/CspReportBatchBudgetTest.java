@@ -1,5 +1,6 @@
 package com.hamstrack.common.security;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -70,34 +71,53 @@ class CspReportBatchBudgetTest {
         logged.stop();
     }
 
+    /**
+     * Guarded, and it asserts the <em>presence</em> of a refusal only indirectly — through a count
+     * of what got through — so it is a window-dependent member the refusal-keyed predicate selects
+     * for its {@code 429}-free arithmetic rather than for a 429. A roll inside the ten-report loop
+     * resets the per-IP count and <strong>more</strong> than five lines are written, so this one
+     * fails rather than passing for free: a false RED, at ~1e-5 a run because the whole spend is a
+     * single in-process request. Wrapped anyway — a known member of a stated category that is left
+     * outside it is the instance-not-category answer.
+     *
+     * <p>Three things are inside the block and must stay there. The IP is built from
+     * {@code attempt.suffix()} (a {@code .8x} range of its own; the sibling below spends {@code .9x})
+     * because a roll replaces the window and a same-key retry would start from the count the
+     * discarded attempt left behind. The appender is cleared and {@code dropsBefore} is read per
+     * attempt, because both are cumulative across a discarded attempt: a retry that kept either
+     * would be asserting about two attempts at once.
+     */
     @Test
     void oneRequestCarryingTenReportsWritesOnlyAsManyLinesAsTheBudgetPaysFor() throws Exception {
-        double dropsBefore = dropped("budget");
-        var batch = new StringBuilder("[").append(REPORT);
-        for (int i = 1; i < 10; i++) {
-            batch.append(",").append(REPORT);
-        }
+        FixedWindow.inOneMinute(attempt -> {
+            logged.list.clear();
+            double dropsBefore = dropped("budget");
+            var batch = new StringBuilder("[").append(REPORT);
+            for (int i = 1; i < 10; i++) {
+                batch.append(",").append(REPORT);
+            }
 
-        assertThat(status(batch.append("]").toString(), "198.51.100.99"))
-                .as("the request itself is admitted and answered like every other: a batch cut "
-                    + "short is not a refusal, and there is nothing a report sender is entitled "
-                    + "to know")
-                .isEqualTo(204);
+            assertThat(status(batch.append("]").toString(), "198.51.100.8" + attempt.suffix()))
+                    .as("the request itself is admitted and answered like every other: a batch cut "
+                        + "short is not a refusal, and there is nothing a report sender is entitled "
+                        + "to know")
+                    .isEqualTo(204);
 
-        assertThat(logged.list)
-                .as("""
-                    A BUDGET OF 5 A MINUTE MUST MEAN 5 LINES A MINUTE.
+            assertThat(logged.list)
+                    .as("""
+                        A BUDGET OF 5 A MINUTE MUST MEAN 5 LINES A MINUTE.
 
-                    Spent once per REQUEST, this one body buys ten - and at the shipped defaults \
-                    the ~19 minimal reports that fit a 16 KB body turned an instance ceiling of \
-                    600 into ~12,000 lines a minute, i.e. the megabytes a minute the class javadoc \
-                    says one unbounded field would have cost. There are no unbounded fields left; \
-                    the multiplication was in the accounting.""")
-                .hasSize(5);
-        assertThat(dropped("budget") - dropsBefore)
-                .as("and the five that were not written are counted, because a sink that "
-                    + "discards silently is a sink whose silence cannot be read")
-                .isEqualTo(5.0);
+                        Spent once per REQUEST, this one body buys ten - and at the shipped \
+                        defaults the ~19 minimal reports that fit a 16 KB body turned an instance \
+                        ceiling of 600 into ~12,000 lines a minute, i.e. the megabytes a minute \
+                        the class javadoc says one unbounded field would have cost. There are no \
+                        unbounded fields left; the multiplication was in the accounting.""")
+                    .hasSize(5);
+            assertThat(dropped("budget") - dropsBefore)
+                    .as("and the five that were not written are counted, because a sink that "
+                        + "discards silently is a sink whose silence cannot be read")
+                    .isEqualTo(5.0);
+        });
     }
 
     /**
@@ -107,15 +127,20 @@ class CspReportBatchBudgetTest {
      */
     @Test
     void theSixthLineIsRefusedWhetherItArrivesAloneOrInABatch() throws Exception {
-        for (int i = 0; i < 5; i++) {
-            assertThat(status(REPORT, "198.51.100.98")).isEqualTo(204);
-        }
+        // The per-IP window again (reports-per-minute is 10000 in this context), so the retry key
+        // is the address — a .9x range of its own, since the sibling above spends .8x.
+        FixedWindow.inOneMinute(attempt -> {
+            var ip = "198.51.100.9" + attempt.suffix();
+            for (int i = 0; i < 5; i++) {
+                assertThat(status(REPORT, ip)).isEqualTo(204);
+            }
 
-        assertThat(status(REPORT, "198.51.100.98"))
-                .as("five single-report requests spend five tokens, so the sixth request is "
-                    + "refused by the filter exactly as before — per-line charging did not make "
-                    + "the ordinary report-uri case cheaper or dearer")
-                .isEqualTo(429);
+            assertThat(status(REPORT, ip))
+                    .as("five single-report requests spend five tokens, so the sixth request is "
+                        + "refused by the filter exactly as before — per-line charging did not make "
+                        + "the ordinary report-uri case cheaper or dearer")
+                    .isEqualTo(429);
+        });
     }
 
     private int status(String body, String ip) throws Exception {

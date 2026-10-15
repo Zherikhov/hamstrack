@@ -1,5 +1,6 @@
 package com.hamstrack.workspace;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -37,9 +38,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * request count is still well inside its own budget, which is precisely why one does not imply the
  * other.
  *
- * <p>Both windows are fixed epoch-minute, so a run that straddles a minute boundary would see the
- * count reset. The limits here are set to <strong>2</strong> and the assertions spend three
- * requests, which is far inside a minute on any machine that can run the suite at all.
+ * <p>Both windows are fixed epoch-minute, so a boundary falling inside a block would see the count
+ * reset. That is handled by {@link FixedWindow} and <strong>not</strong> by the paragraph that used
+ * to stand here, which argued that the bodies are "far inside a minute on any machine that can run
+ * the suite at all". True, and irrelevant: the failure mode is <em>phase</em>, not duration — a
+ * short body bounds the probability of straddling and establishes nothing about any one run, and
+ * four full-suite runs died on exactly that argument. The {@code GET} assertion in the first method
+ * is why the fixture's roll check is unconditional rather than failure-gated: a roll makes that
+ * {@code 200} true for free, and nothing throws for a {@code catch}-gated retry to see (HD-334).
  */
 @SpringBootTest(properties = {
         "app.demo.seed-on-first-login=false",
@@ -77,42 +83,44 @@ class WriteBudgetTest extends StorageTestBase {
     /** AC-12, all three halves of it. */
     @Test
     void mutatingRequestsAreBudgetedPerPrincipalAndReadsAreNot() throws Exception {
-        var ctx = newProject();
-        var other = newProject();
-        // createIssue spends one unit of this principal's budget; everything below counts from
-        // there, which is why the assertions are on "the next mutation" rather than on a count.
-        var issue = createIssue(ctx);
-        var otherIssue = createIssue(other);
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
+            var other = newProject();
+            // createIssue spends one unit of this principal's budget; everything below counts from
+            // there, which is why the assertions are on "the next mutation" rather than on a count.
+            var issue = createIssue(ctx);
+            var otherIssue = createIssue(other);
 
-        var url = "/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId()
-                  + "/issues/" + issue;
+            var url = "/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId()
+                      + "/issues/" + issue;
 
-        mockMvc.perform(patch(url).header("Authorization", "Bearer " + ctx.token())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"two\"}"))
-                .andExpect(status().isOk());
+            mockMvc.perform(patch(url).header("Authorization", "Bearer " + ctx.token())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"title\":\"two\"}"))
+                    .andExpect(status().isOk());
 
-        mockMvc.perform(patch(url).header("Authorization", "Bearer " + ctx.token())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"three\"}"))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers
-                        .containsString("Too many write requests")));
+            mockMvc.perform(patch(url).header("Authorization", "Bearer " + ctx.token())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"title\":\"three\"}"))
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers
+                            .containsString("Too many write requests")));
 
-        // A GET on the very same path is untouched: the interceptor is in the chain and does not
-        // apply to the verb. If this ever fails, every board and issue page on the instance is
-        // being charged to the write budget.
-        mockMvc.perform(get(url).header("Authorization", "Bearer " + ctx.token()))
-                .andExpect(status().isOk());
+            // A GET on the very same path is untouched: the interceptor is in the chain and does not
+            // apply to the verb. If this ever fails, every board and issue page on the instance is
+            // being charged to the write budget.
+            mockMvc.perform(get(url).header("Authorization", "Bearer " + ctx.token()))
+                    .andExpect(status().isOk());
 
-        // ...and a different principal has their own window.
-        mockMvc.perform(patch("/api/workspaces/" + other.wsId() + "/projects/" + other.projectId()
-                              + "/issues/" + otherIssue)
-                        .header("Authorization", "Bearer " + other.token())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"title\":\"mine\"}"))
-                .andExpect(status().isOk());
+            // ...and a different principal has their own window.
+            mockMvc.perform(patch("/api/workspaces/" + other.wsId() + "/projects/" + other.projectId()
+                                  + "/issues/" + otherIssue)
+                            .header("Authorization", "Bearer " + other.token())
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"title\":\"mine\"}"))
+                    .andExpect(status().isOk());
+        });
     }
 
     /**
@@ -126,27 +134,29 @@ class WriteBudgetTest extends StorageTestBase {
      */
     @Test
     void uploadedBytesAreBudgetedSeparatelyFromRequestCount() throws Exception {
-        var ctx = newProject();
-        var issue = createIssue(ctx);
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
+            var issue = createIssue(ctx);
 
-        // createIssue was request 1; this upload is request 2 — the last one the REQUEST budget
-        // allows — and it spends 4 000 of the 5 000-byte window.
-        uploadRaw(ctx, issue, "a.txt", bytesOf(4000)).andExpect(status().isCreated());
+            // createIssue was request 1; this upload is request 2 — the last one the REQUEST budget
+            // allows — and it spends 4 000 of the 5 000-byte window.
+            uploadRaw(ctx, issue, "a.txt", bytesOf(4000)).andExpect(status().isCreated());
 
-        // A fresh principal in the same workspace, so the request budget cannot be what refuses:
-        // this caller has spent nothing.
-        var second = user();
-        member(workspaceRepository.findById(ctx.wsId()).orElseThrow(), second);
-        projectMember(projectRepository.findById(ctx.projectId()).orElseThrow(), second);
-        var token = login(second);
-        var fresh = new Ctx(ctx.wsId(), ctx.projectId(), token, ctx.config());
+            // A fresh principal in the same workspace, so the request budget cannot be what refuses:
+            // this caller has spent nothing.
+            var second = user();
+            member(workspaceRepository.findById(ctx.wsId()).orElseThrow(), second);
+            projectMember(projectRepository.findById(ctx.projectId()).orElseThrow(), second);
+            var token = login(second);
+            var fresh = new Ctx(ctx.wsId(), ctx.projectId(), token, ctx.config());
 
-        uploadRaw(fresh, issue, "b.txt", bytesOf(4000)).andExpect(status().isCreated());
-        uploadRaw(fresh, issue, "c.txt", bytesOf(4000))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers
-                        .containsString("Too many uploaded bytes")));
+            uploadRaw(fresh, issue, "b.txt", bytesOf(4000)).andExpect(status().isCreated());
+            uploadRaw(fresh, issue, "c.txt", bytesOf(4000))
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers
+                            .containsString("Too many uploaded bytes")));
+        });
     }
 
     /**
@@ -168,19 +178,21 @@ class WriteBudgetTest extends StorageTestBase {
      */
     @Test
     void theByteBudgetIsSpentBeforeTenancyAndItsRefusalNamesNoTarget() throws Exception {
-        var ctx = newProject();
-        var stranger = user();
-        var ghost = new Ctx(UUID.randomUUID(), UUID.randomUUID(), login(stranger), ctx.config());
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
+            var stranger = user();
+            var ghost = new Ctx(UUID.randomUUID(), UUID.randomUUID(), login(stranger), ctx.config());
 
-        // Request 1 of this principal's window (the request budget is 2, so neither call meets it).
-        // 4 000 of the 5 000-byte window are spent by an upload that is then refused 404.
-        uploadRaw(ghost, 1, "a.txt", bytesOf(4000))
-                .andExpect(status().isNotFound());
+            // Request 1 of this principal's window (the request budget is 2, so neither call meets it).
+            // 4 000 of the 5 000-byte window are spent by an upload that is then refused 404.
+            uploadRaw(ghost, 1, "a.txt", bytesOf(4000))
+                    .andExpect(status().isNotFound());
 
-        uploadRaw(ghost, 1, "b.txt", bytesOf(4000))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers
-                        .containsString("Too many uploaded bytes")));
+            uploadRaw(ghost, 1, "b.txt", bytesOf(4000))
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(jsonPath("$.detail").value(org.hamcrest.Matchers
+                            .containsString("Too many uploaded bytes")));
+        });
     }
 }

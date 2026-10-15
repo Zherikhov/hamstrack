@@ -1,6 +1,7 @@
 package com.hamstrack.report;
 
 import com.hamstrack.common.ratelimit.ConcurrencyLimitedException;
+import com.hamstrack.common.testsupport.NoFixedWindow;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -67,6 +68,10 @@ class ExpensiveReadBulkheadSaturationTest extends BulkheadSaturationBase {
 
     @Test
     @Timeout(120)
+    @NoFixedWindow(why = NoFixedWindow.Why.CLOCK_FREE_MECHANISM,
+            refusedBy = "PerPrincipalInFlightLimit.acquire",
+            reason = "The surface semaphore is the only refuser here - this context runs "
+                     + "with app.rate-limit.enabled=false, so no window exists to roll.")
     void aSaturatedExpensiveSurfaceLeavesTheInteractiveApiAnswering() throws Exception {
         var first = newProject();
         var second = newProject();

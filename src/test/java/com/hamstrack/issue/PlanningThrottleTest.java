@@ -1,5 +1,6 @@
 package com.hamstrack.issue;
 
+import com.hamstrack.common.testsupport.FixedWindow;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -56,27 +57,29 @@ class PlanningThrottleTest extends LabelTestBase {
      */
     @Test
     void theAggregateIsThrottledAndTheRefusalArrivesBeforeTenancy() throws Exception {
-        var mine = newProject();
-        var theirs = newProject();   // its own workspace, its own owner
+        FixedWindow.inOneMinute(attempt -> {
+            var mine = newProject();
+            var theirs = newProject();   // its own workspace, its own owner
 
-        // Three planning reads against a workspace I am not a member of: 404 every time, and each
-        // still costs me a unit of my own budget.
-        for (int i = 0; i < 3; i++) {
+            // Three planning reads against a workspace I am not a member of: 404 every time, and each
+            // still costs me a unit of my own budget.
+            for (int i = 0; i < 3; i++) {
+                backlog(theirs.wsId(), theirs.projectId(), mine.token())
+                        .andExpect(status().isNotFound());
+            }
+
             backlog(theirs.wsId(), theirs.projectId(), mine.token())
-                    .andExpect(status().isNotFound());
-        }
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
 
-        backlog(theirs.wsId(), theirs.projectId(), mine.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            // Identical for a workspace that does not exist at all — the refusal answers no existence
+            // question, which is the property that makes spending it in preHandle safe.
+            backlog(UUID.randomUUID(), UUID.randomUUID(), mine.token())
+                    .andExpect(status().isTooManyRequests());
 
-        // Identical for a workspace that does not exist at all — the refusal answers no existence
-        // question, which is the property that makes spending it in preHandle safe.
-        backlog(UUID.randomUUID(), UUID.randomUUID(), mine.token())
-                .andExpect(status().isTooManyRequests());
-
-        // AC-2: a scan against you must never throttle you.
-        backlog(theirs.wsId(), theirs.projectId(), theirs.token()).andExpect(status().isOk());
+            // AC-2: a scan against you must never throttle you.
+            backlog(theirs.wsId(), theirs.projectId(), theirs.token()).andExpect(status().isOk());
+        });
     }
 
     /**
@@ -88,16 +91,18 @@ class PlanningThrottleTest extends LabelTestBase {
      */
     @Test
     void theSectionReadsSpendTheSameBudgetAsTheAggregate() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        backlog(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
-        backlogSection(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
-        backlogSection(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
+            backlog(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
+            backlogSection(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
+            backlogSection(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
 
-        // A separate pot would let this fourth request through.
-        backlog(ctx.wsId(), ctx.projectId(), ctx.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"));
+            // A separate pot would let this fourth request through.
+            backlog(ctx.wsId(), ctx.projectId(), ctx.token())
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"));
+        });
     }
 
     /**
@@ -112,36 +117,38 @@ class PlanningThrottleTest extends LabelTestBase {
      */
     @Test
     void aRefusedPlanningReadIsNeverANarrowedView() throws Exception {
-        var ctx = newProject();
+        FixedWindow.inOneMinute(attempt -> {
+            var ctx = newProject();
 
-        backlog(ctx.wsId(), ctx.projectId(), ctx.token())
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.sectionCap").exists())
-                .andExpect(jsonPath("$.backlog").exists());
-        backlog(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
-        backlog(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
+            backlog(ctx.wsId(), ctx.projectId(), ctx.token())
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.sectionCap").exists())
+                    .andExpect(jsonPath("$.backlog").exists());
+            backlog(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
+            backlog(ctx.wsId(), ctx.projectId(), ctx.token()).andExpect(status().isOk());
 
-        var refused = backlog(ctx.wsId(), ctx.projectId(), ctx.token())
-                .andExpect(status().isTooManyRequests())
-                .andExpect(header().exists("Retry-After"))
-                .andExpect(jsonPath("$.backlog").doesNotExist())
-                .andExpect(jsonPath("$.sectionCap").doesNotExist())
-                .andReturn();
+            var refused = backlog(ctx.wsId(), ctx.projectId(), ctx.token())
+                    .andExpect(status().isTooManyRequests())
+                    .andExpect(header().exists("Retry-After"))
+                    .andExpect(jsonPath("$.backlog").doesNotExist())
+                    .andExpect(jsonPath("$.sectionCap").doesNotExist())
+                    .andReturn();
 
-        var retryAfter = Integer.parseInt(refused.getResponse().getHeader("Retry-After"));
-        assertThat(retryAfter)
-                .as("Retry-After is the seconds until the caller's own minute window rolls, so it "
-                    + "is inside (0, 60] — a bigger number would be a different mechanism and a "
-                    + "client would wait for it")
-                .isBetween(1, 60);
+            var retryAfter = Integer.parseInt(refused.getResponse().getHeader("Retry-After"));
+            assertThat(retryAfter)
+                    .as("Retry-After is the seconds until the caller's own minute window rolls, so it "
+                        + "is inside (0, 60] — a bigger number would be a different mechanism and a "
+                        + "client would wait for it")
+                    .isBetween(1, 60);
 
-        // The refusal carries no errorType: clients discriminate the two OCCUPANCY refusals from a
-        // budget refusal on its presence, exactly as they do on the reports and search surfaces.
-        assertThat(refused.getResponse().getContentAsString())
-                .as("the budget 429 must not grow an errorType — its absence is how a client tells "
-                    + "'you asked too often' from TOO_MANY_IN_FLIGHT / EXPENSIVE_SURFACE_BUSY, and "
-                    + "the two call for different client behaviour")
-                .doesNotContain("errorType\":\"");
+            // The refusal carries no errorType: clients discriminate the two OCCUPANCY refusals from a
+            // budget refusal on its presence, exactly as they do on the reports and search surfaces.
+            assertThat(refused.getResponse().getContentAsString())
+                    .as("the budget 429 must not grow an errorType — its absence is how a client tells "
+                        + "'you asked too often' from TOO_MANY_IN_FLIGHT / EXPENSIVE_SURFACE_BUSY, and "
+                        + "the two call for different client behaviour")
+                    .doesNotContain("errorType\":\"");
+        });
     }
 
     private ResultActions backlog(UUID wsId, UUID projectId, String token) throws Exception {

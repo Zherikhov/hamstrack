@@ -3,9 +3,13 @@ package com.hamstrack.common.testsupport;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * <strong>The attribution of {@link SourceCallSites} on the exact shapes that fooled its two
@@ -18,6 +22,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * else; a test written in a different style would pass for the wrong reason.
  */
 class SourceCallSitesTest {
+
+    /**
+     * The floor on {@code everyTestAnnotationInTheSuiteSitsWhereTheParserCanAttributeIt}: the test
+     * methods the suite declares. Measured 2026-10-14 by
+     * {@code grep -rhE "^\s*@(Test|ParameterizedTest|RepeatedTest)\b" src/test/java | wc -l} —
+     * 2038, every one of them at exactly four spaces.
+     */
+    private static final int TEST_ANNOTATION_FLOOR = 2000;
 
     /**
      * The HD-298 regression: a call rewrapped over two lines has no semicolon on its first line
@@ -157,5 +169,141 @@ class SourceCallSitesTest {
                 .as("a block comment CLOSED before the occurrence leaves it in code").isFalse();
         assertThat(SourceCallSites.isCommentedAt(live, live.indexOf("@Value(")))
                 .as("the real annotation must stay visible, or every binding leaves the mapping").isFalse();
+    }
+
+    /**
+     * <strong>The walk takes a root, and the root is what it says it is</strong> (HD-334).
+     *
+     * <p>The parser was hard-coded to {@code src/main/java} and a seal over the SUITE needed the
+     * same attribution, so the walk was generalised rather than copied — and a shared derivation
+     * trades a loud failure (two parsers disagreeing reds one of them) for a silent one (one parser
+     * blind everywhere), so it gets floors in <strong>both</strong> directions: the forms it must
+     * see and the forms it must not.
+     */
+    @Test
+    void theWalkSeesExactlyTheRootItIsGivenAndNothingElse() throws IOException {
+        var main = SourceCallSites.unitsUnder(SourceCallSites.MAIN_SOURCES, Set.of());
+        var test = SourceCallSites.unitsUnder(SourceCallSites.TEST_SOURCES, Set.of());
+
+        assertThat(main).as("the production tree is not small; a short walk is a broken walk")
+                .hasSizeGreaterThan(250);
+        assertThat(test).as("nor is the suite — and the SUITE root is the one this generalisation "
+                            + "exists for, so a floor on it is not decoration")
+                .hasSizeGreaterThan(250);
+
+        assertThat(main).allSatisfy(unit -> assertThat(unit.path().toString())
+                .as("a unit from the production walk must come from the production tree")
+                .contains("main"));
+        assertThat(test).allSatisfy(unit -> assertThat(unit.path().toString())
+                .as("and one from the suite walk from the suite tree — the two roots must not "
+                    + "bleed, or a seal over the suite silently asserts about production")
+                .contains("test"));
+        assertThat(main.stream().map(SourceCallSites.CompilationUnit::type).toList())
+                .as("the production walk must not contain this very test, which is the simplest "
+                    + "way for a root parameter to be ignored")
+                .doesNotContain("SourceCallSitesTest");
+        assertThat(test.stream().map(SourceCallSites.CompilationUnit::type).toList())
+                .contains("SourceCallSitesTest", "FixedWindowCoverageTest");
+        assertThat(test).allSatisfy(unit -> assertThat(unit.type())
+                .as("the type is the simple name, whatever the depth of the package")
+                .doesNotContain(".java"));
+    }
+
+    /** An excluded simple name is skipped, on whichever root it is asked about. */
+    @Test
+    void anExcludedFileNameIsSkippedOnEitherRoot() throws IOException {
+        assertThat(SourceCallSites.unitsUnder(SourceCallSites.TEST_SOURCES,
+                        Set.of("SourceCallSitesTest.java")).stream()
+                .map(SourceCallSites.CompilationUnit::type).toList())
+                .doesNotContain("SourceCallSitesTest")
+                .contains("SourceCallSites");
+    }
+
+    /**
+     * <strong>Every {@code @Test} in the suite sits where {@link SourceCallSites#DECLARATION} can
+     * attribute it.</strong>
+     *
+     * <p>The parser recognises a declaration at <em>exactly</em> four spaces, by deliberate
+     * comment. That assumption was built against {@code src/main/java} and came with the root
+     * parameter into {@code src/test/java} (HD-334) — the one tree where a {@code @Nested} class
+     * puts a method eight spaces in. Measured 2026-10-14: a planted {@code @Nested} class holding
+     * a {@code @Test} that asserts {@code isTooManyRequests()} left
+     * {@code FixedWindowCoverageTest}'s population at 63, unchanged, and the build green. The
+     * member was neither demanded to be guarded nor reported as a stale exemption, which is the
+     * false-green direction and the only one that matters here.
+     *
+     * <p>Asked of the annotation rather than of the declaration on purpose: in this codebase's
+     * style an annotation line carries the indentation of the method it precedes, so one
+     * comparison catches <em>both</em> causes — a nested class, and a file written at a different
+     * depth — where a count of attributed methods against a count of annotations misses a nested
+     * {@code @Test} whose misattribution happens to land on a name nothing else annotates.
+     *
+     * <p>Latent today and fixed anyway: {@code @Nested} appears once in the whole suite, in
+     * {@code ExecutedTestClassRecorder}'s javadoc, as prose about the tree the coverage guard
+     * scans. A guard installed only once a defect is live is the instance, not the category.
+     */
+    @Test
+    void everyTestAnnotationInTheSuiteSitsWhereTheParserCanAttributeIt() throws IOException {
+        var misplaced = new ArrayList<String>();
+        int annotations = 0;
+
+        for (var unit : SourceCallSites.unitsUnder(SourceCallSites.TEST_SOURCES, Set.of())) {
+            var lines = unit.lines();
+            for (int i = 0; i < lines.size(); i++) {
+                var line = lines.get(i);
+                if (!SourceCallSites.TEST_ANNOTATION.matcher(line).find()) {
+                    continue;
+                }
+                annotations++;
+                if (!line.startsWith("    @")) {
+                    misplaced.add(unit.path() + ":" + (i + 1) + "  " + line.strip()
+                                  + "  (indented " + indentOf(line) + ", not 4)");
+                }
+            }
+        }
+
+        assertThat(annotations)
+                .as("the suite declares %d test methods, under the floor of %d — this arm is over "
+                    + "the WHOLE suite, so a smaller number is a broken walk and not a smaller "
+                    + "suite (measured 2026-10-14: 2038)", annotations, TEST_ANNOTATION_FLOOR)
+                .isGreaterThanOrEqualTo(TEST_ANNOTATION_FLOOR);
+        assertThat(misplaced)
+                .as("""
+                    A TEST METHOD THE PARSER CANNOT ATTRIBUTE IS INVISIBLE TO EVERY POPULATION \
+                    BUILT ON IT, IN THE FALSE-GREEN DIRECTION.
+
+                    SourceCallSites.DECLARATION accepts a declaration at exactly four spaces, so \
+                    the line(s) above are attributed to whatever unrelated method precedes them - \
+                    they are neither demanded to be guarded nor reported as a stale exemption. \
+                    There are two causes and two actions:
+
+                      1. A @Nested inner class. Flatten it, or teach DECLARATION the deeper depth \
+                         here, in this one parser, and extend this arm to the depths it accepts.
+                      2. A file written at some other indentation. Reformat it to the suite's \
+                         four-space method level.
+
+                    Do not lower the floor above to make a run pass.""")
+                .isEmpty();
+    }
+
+    private static int indentOf(String line) {
+        int i = 0;
+        while (i < line.length() && line.charAt(i) == ' ') {
+            i++;
+        }
+        return i;
+    }
+
+    /**
+     * And a root that does not exist <strong>throws</strong>. Every consumer of this walk asserts
+     * "nothing offends", so a walk that quietly found no files is the greenest possible answer to a
+     * seal that has stopped working — the one failure mode a scan must never have.
+     */
+    @Test
+    void aRootThatDoesNotExistIsRefusedRatherThanReportedEmpty() {
+        assertThatThrownBy(() -> SourceCallSites.unitsUnder(Path.of("src", "nope", "java"),
+                        Set.of()))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("reports clean for ever");
     }
 }
