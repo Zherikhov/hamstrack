@@ -1,6 +1,7 @@
 package com.hamstrack.common.ratelimit;
 
 import com.hamstrack.common.security.ContentSecurityPolicy;
+import com.hamstrack.common.testsupport.Unique;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -128,8 +129,7 @@ class ClientIpTest {
                         .with(request -> { request.setRemoteAddr("198.51.100.32"); return request; })
                         .header("X-Forwarded-For", ",")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"email\":\"nobody-" + System.nanoTime()
-                                 + "@example.com\",\"password\":\"x-wrong-pass\"}"))
+                        .content("{\"email\":\"" + Unique.email("nobody") + "\",\"password\":\"x-wrong-pass\"}"))
                 .andExpect(status().isUnauthorized());
     }
 }

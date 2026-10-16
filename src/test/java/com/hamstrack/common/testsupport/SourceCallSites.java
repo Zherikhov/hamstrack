@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -273,5 +274,389 @@ public final class SourceCallSites {
     private static List<CompilationUnit> compilationUnits(Set<String> excludedFiles)
             throws IOException {
         return unitsUnder(MAIN_SOURCES, excludedFiles);
+    }
+
+    // ------------------------------------------- statements and concatenation chains (HD-329)
+
+    /**
+     * One statement of a compilation unit, as a single line of code text.
+     *
+     * <p>Built by one state machine that also records, per character, the source line it came from
+     * and whether it sits inside a string, character or text-block literal — so every question
+     * about a statement ("is this occurrence quoted?", "is this comma at argument depth?") is
+     * answered from the same pass that produced the text. The alternative was a second scanner
+     * recomputing literal spans from the joined text, and two scanners over one string is the drift
+     * this class exists to prevent.
+     *
+     * @param text    code only: comment-only lines dropped, trailing {@code //} comments and
+     *                {@code /* *}{@code /} spans removed, lines joined with a single space
+     * @param lines   the 1-based source line of each character of {@code text}
+     * @param columns the 1-based source column of each character of {@code text}
+     * @param literal whether each character of {@code text} is inside a literal, quotes included
+     */
+    record Statement(String text, int[] lines, int[] columns, boolean[] literal) {
+
+        int lineOf(int at) {
+            return lines[clamp(at, lines.length)];
+        }
+
+        int columnOf(int at) {
+            return columns[clamp(at, columns.length)];
+        }
+
+        private static int clamp(int at, int length) {
+            return Math.min(Math.max(at, 0), length - 1);
+        }
+
+        /**
+         * The variable this statement assigns to, or {@code null}. Both shapes that matter are
+         * recognised — a declaration ({@code var name = …}, {@code String tag = …}) and a bare
+         * assignment ({@code email = …}) — because a clock read into a variable and concatenated
+         * in a <em>later</em> statement is an identity use that no single-statement predicate can
+         * see.
+         */
+        String declares() {
+            var matcher = ASSIGNS.matcher(text);
+            return matcher.find() ? matcher.group(2) : null;
+        }
+
+        /**
+         * The declared type of {@link #declares()} — {@code "String"}, {@code "long"},
+         * {@code "var"} — or {@code null} for a bare assignment to something declared elsewhere.
+         * A consumer asking "is this value a name or a measurement?" has no better signal in the
+         * source text, and the two are written differently here: a name is a {@code String}.
+         */
+        String declaredType() {
+            var matcher = ASSIGNS.matcher(text);
+            return matcher.find() ? matcher.group(1) : null;
+        }
+
+        /** The expression assigned to {@link #declares()}, or {@code null}. */
+        String declaredFrom() {
+            var matcher = ASSIGNS.matcher(text);
+            return matcher.find() ? text.substring(matcher.end() - 1) : null;
+        }
+    }
+
+    private static final Pattern ASSIGNS = Pattern.compile(
+            "^\\s*(?:final\\s+)?(?:(var|[\\w.<>\\[\\],?]+(?:\\s*\\[\\s*\\])?)\\s+)?(\\w+)\\s*=[^=]");
+
+    /**
+     * One occurrence of a needle in code, with the expression it is an operand of.
+     *
+     * @param chain    the {@code +}-joined expression the occurrence belongs to — bounded by the
+     *                 enclosing argument list, assignment or comma, and expanded <em>through</em>
+     *                 grouping parentheses, so {@code setSlug("ws-" + UUID…substring(0, 8) + "-"
+     *                 + (System.nanoTime() % 100000))} yields the whole name and not just the
+     *                 parenthesised modulus. This is the unit a rule about a composed name is
+     *                 about; the enclosing statement is not, because a MockMvc chain is one
+     *                 statement and anything anywhere in it would appear to be beside anything
+     *                 else.
+     * @param declares     the variable the statement assigns to, or {@code null}
+     * @param declaredType the declared type of that variable, or {@code null}
+     * @param declaredFrom the expression assigned to {@code declares}, or {@code null} — a
+     *                     consumer deciding whether that variable's value IS this occurrence
+     *                     needs the whole right-hand side, and re-deriving it from
+     *                     {@code statement} would be a second copy of one regex
+     */
+    public record Mention(Path path, String type, int line, int column, String method,
+                          String needle, String statement, String chain, String declares,
+                          String declaredType, String declaredFrom) {
+
+        /** {@code src/test/java/com/hamstrack/Foo.java:258}, with forward slashes on any OS. */
+        public String site() {
+            return path.toString().replace('\\', '/') + ":" + line;
+        }
+
+        /**
+         * {@code …/Foo.java:258:43} — the population key. Keyed on the position and not on the
+         * file, the type or the method: several files here hold two occurrences on one line and
+         * every one of them must stay its own member (the HD-306 shape).
+         */
+        public String position() {
+            return site() + ":" + column;
+        }
+    }
+
+    /**
+     * Every occurrence of any of {@code needles} in the code under {@code root}, in tree order,
+     * with its concatenation chain.
+     *
+     * <p><strong>An occurrence inside a literal is not an occurrence.</strong> A seal over a call
+     * shape has to name that shape in its own source, so the needle appears quoted in the scanner
+     * and in its own plants; a scan that counted those would report its own text as a member and
+     * can never be red for the right reason.
+     */
+    public static List<Mention> mentions(Path root, Collection<String> needles,
+                                         Set<String> excludedFiles) throws IOException {
+        var out = new ArrayList<Mention>();
+        for (var unit : unitsUnder(root, excludedFiles)) {
+            out.addAll(mentions(unit, needles));
+        }
+        return out;
+    }
+
+    /**
+     * {@link #mentions(Path, Collection, Set)} for one already-read unit — what a consumer that
+     * needs the unit's statements as well as its mentions calls, so the file is parsed once.
+     */
+    public static List<Mention> mentions(CompilationUnit unit, Collection<String> needles) {
+        var out = new ArrayList<Mention>();
+        var enclosing = enclosingMethods(unit.lines());
+        for (var statement : statementsOf(unit.lines())) {
+            for (var needle : needles) {
+                int from = 0;
+                int at;
+                while ((at = statement.text().indexOf(needle, from)) >= 0) {
+                    from = at + 1;
+                    if (statement.literal()[at]) {
+                        continue;
+                    }
+                    var line = statement.lineOf(at);
+                    var method = line - 1 < enclosing.size()
+                            ? enclosing.get(line - 1) : FILE_SCOPE;
+                    out.add(new Mention(unit.path(), unit.type(), line, statement.columnOf(at),
+                            method, needle, statement.text(), chainAround(statement, at),
+                            statement.declares(), statement.declaredType(),
+                            statement.declaredFrom()));
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The statements of a compilation unit: split at {@code ;}, {@code &#123;} and {@code &#125;}
+     * at paren depth zero, so a lambda body inside an argument list and a whole MockMvc chain each
+     * stay one statement.
+     */
+    static List<Statement> statementsOf(List<String> lines) {
+        var out = new ArrayList<Statement>();
+        var text = new StringBuilder();
+        var owner = new ArrayList<Integer>();
+        var column = new ArrayList<Integer>();
+        var quoted = new ArrayList<Boolean>();
+        var depth = 0;
+        var inString = false;
+        var inChar = false;
+        var inTextBlock = false;
+        var inBlockComment = false;
+
+        for (var index = 0; index < lines.size(); index++) {
+            var line = lines.get(index);
+            var lineNumber = index + 1;
+            if (!inBlockComment && !inTextBlock && !isCode(line.trim())) {
+                continue;
+            }
+            var i = 0;
+            while (i < line.length()) {
+                var c = line.charAt(i);
+                if (inBlockComment) {
+                    if (line.startsWith("*/", i)) {
+                        inBlockComment = false;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
+                    continue;
+                }
+                if (inTextBlock) {
+                    if (line.startsWith("\"\"\"", i)) {
+                        inTextBlock = false;
+                        append(text, owner, column, quoted, "\"\"\"", lineNumber, i + 1, true);
+                        i += 3;
+                    } else {
+                        append(text, owner, column, quoted, String.valueOf(c), lineNumber, i + 1, true);
+                        i++;
+                    }
+                    continue;
+                }
+                if (inString || inChar) {
+                    if (c == '\\' && i + 1 < line.length()) {
+                        append(text, owner, column, quoted, line.substring(i, i + 2), lineNumber, i + 1, true);
+                        i += 2;
+                        continue;
+                    }
+                    append(text, owner, column, quoted, String.valueOf(c), lineNumber, i + 1, true);
+                    inString = inString && c != '"';
+                    inChar = inChar && c != '\'';
+                    i++;
+                    continue;
+                }
+                if (line.startsWith("//", i)) {
+                    break;
+                }
+                if (line.startsWith("/*", i)) {
+                    inBlockComment = true;
+                    i += 2;
+                    continue;
+                }
+                if (line.startsWith("\"\"\"", i)) {
+                    inTextBlock = true;
+                    append(text, owner, column, quoted, "\"\"\"", lineNumber, i + 1, true);
+                    i += 3;
+                    continue;
+                }
+                if (c == '"' || c == '\'') {
+                    inString = c == '"';
+                    inChar = c == '\'';
+                    append(text, owner, column, quoted, String.valueOf(c), lineNumber, i + 1, true);
+                    i++;
+                    continue;
+                }
+                if (c == '(' || c == '[') {
+                    depth++;
+                } else if (c == ')' || c == ']') {
+                    depth = Math.max(0, depth - 1);
+                }
+                append(text, owner, column, quoted, String.valueOf(c), lineNumber, i + 1, false);
+                i++;
+                if (depth == 0 && (c == ';' || c == '{' || c == '}')) {
+                    flush(out, text, owner, column, quoted);
+                }
+            }
+            if (!text.isEmpty() && !inTextBlock) {
+                append(text, owner, column, quoted, " ", lineNumber, line.length() + 1, false);
+            }
+        }
+        flush(out, text, owner, column, quoted);
+        return out;
+    }
+
+    private static void append(StringBuilder text, List<Integer> owner, List<Integer> column,
+                               List<Boolean> quoted, String chunk, int line, int col,
+                               boolean literal) {
+        text.append(chunk);
+        for (var i = 0; i < chunk.length(); i++) {
+            owner.add(line);
+            column.add(col + i);
+            quoted.add(literal);
+        }
+    }
+
+    private static void flush(List<Statement> out, StringBuilder text, List<Integer> owner,
+                              List<Integer> column, List<Boolean> quoted) {
+        if (!text.toString().isBlank()) {
+            var lines = new int[owner.size()];
+            var columns = new int[column.size()];
+            var literal = new boolean[quoted.size()];
+            for (var i = 0; i < owner.size(); i++) {
+                lines[i] = owner.get(i);
+                columns[i] = column.get(i);
+                literal[i] = quoted.get(i);
+            }
+            out.add(new Statement(text.toString(), lines, columns, literal));
+        }
+        text.setLength(0);
+        owner.clear();
+        column.clear();
+        quoted.clear();
+    }
+
+    /**
+     * The {@code +}-joined expression the character at {@code at} belongs to — see
+     * {@link Mention#chain()} for why this and not the statement.
+     *
+     * <p>Two walks. First outward through <em>grouping</em> parentheses — a {@code (} whose
+     * preceding non-space character is not an identifier, {@code )} or {@code ]}, i.e. not an
+     * invocation — because {@code (System.nanoTime() % 100000)} is an operand of the name around
+     * it and not a boundary. Then left and right at the resulting depth, stopping at an argument
+     * comma, a semicolon, an assignment, a ternary or the enclosing bracket. Characters inside
+     * literals are never read as syntax, so a comma in a JSON body does not end a chain.
+     */
+    static String chainAround(Statement s, int at) {
+        var text = s.text();
+        var depth = depths(text, s.literal());
+        var d = depth[at];
+        var left = at;
+        while (true) {
+            var opener = enclosingOpener(s, depth, left, d);
+            if (opener < 0 || text.charAt(opener) != '(' || isInvocation(s, opener)) {
+                break;
+            }
+            left = opener;
+            d--;
+        }
+        var start = left;
+        for (var j = left - 1; j >= 0; j--) {
+            if (!s.literal()[j]) {
+                if (depth[j] < d) {
+                    break;
+                }
+                if (depth[j] == d && isChainStop(s, j)) {
+                    break;
+                }
+            }
+            start = j;
+        }
+        var end = Math.max(at, left);
+        for (var k = end; k < text.length(); k++) {
+            if (!s.literal()[k]) {
+                if (depth[k + 1] < d) {
+                    break;
+                }
+                if (depth[k] == d && isChainStop(s, k)) {
+                    break;
+                }
+            }
+            end = k + 1;
+        }
+        return text.substring(start, end).trim();
+    }
+
+    /** Unclosed {@code (}/{@code [} before each character, with one extra slot past the end. */
+    static int[] depths(String text, boolean[] literal) {
+        var depth = new int[text.length() + 1];
+        var current = 0;
+        for (var i = 0; i < text.length(); i++) {
+            depth[i] = current;
+            if (!literal[i]) {
+                var c = text.charAt(i);
+                if (c == '(' || c == '[') {
+                    current++;
+                } else if (c == ')' || c == ']') {
+                    current = Math.max(0, current - 1);
+                }
+            }
+        }
+        depth[text.length()] = current;
+        return depth;
+    }
+
+    private static int enclosingOpener(Statement s, int[] depth, int from, int d) {
+        for (var j = from - 1; j >= 0; j--) {
+            if (s.literal()[j] || depth[j] >= d) {
+                continue;
+            }
+            var c = s.text().charAt(j);
+            return c == '(' || c == '[' ? j : -1;
+        }
+        return -1;
+    }
+
+    private static boolean isInvocation(Statement s, int opener) {
+        for (var j = opener - 1; j >= 0; j--) {
+            var c = s.text().charAt(j);
+            if (c == ' ') {
+                continue;
+            }
+            return Character.isLetterOrDigit(c) || c == '_' || c == '$' || c == ')' || c == ']'
+                   || c == '>';
+        }
+        return false;
+    }
+
+    private static boolean isChainStop(Statement s, int at) {
+        var text = s.text();
+        var c = text.charAt(at);
+        var previous = at > 0 ? text.charAt(at - 1) : '\0';
+        var next = at + 1 < text.length() ? text.charAt(at + 1) : '\0';
+        return switch (c) {
+            case ',', ';', '{', '}' -> true;
+            case '=' -> next != '=' && "=!<>+-*/%&|^".indexOf(previous) < 0;
+            case '?' -> true;
+            case ':' -> previous != ':' && next != ':';
+            default -> false;
+        };
     }
 }

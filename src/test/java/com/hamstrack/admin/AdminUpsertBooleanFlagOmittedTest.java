@@ -4,7 +4,14 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.FixtureRows;
+import com.hamstrack.common.testsupport.Unique;
+import com.hamstrack.issue.repository.FieldDefRepository;
+import com.hamstrack.issue.repository.FieldSetRepository;
+import com.hamstrack.issue.repository.PrioritySetRepository;
 import com.jayway.jsonpath.JsonPath;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -14,6 +21,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
+import java.util.UUID;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -36,9 +44,37 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class AdminUpsertBooleanFlagOmittedTest {
 
+    /**
+     * Rows this class creates in the global catalog, removed again after every test (HD-329). Every
+     * one of them is created to be inspected and is never bound to a project, so nothing refers to
+     * it — measured 2026-10-15 on the development database, where 236 orphaned {@code HD73-PSET%}
+     * priority sets had accumulated.
+     */
+    private final FixtureRows globalRows = new FixtureRows();
+
     @Autowired MockMvc mockMvc;
     @Autowired UserRepository userRepository;
+    @Autowired FieldDefRepository fieldDefRepository;
+    @Autowired FieldSetRepository fieldSetRepository;
+    @Autowired PrioritySetRepository prioritySetRepository;
     @Autowired PasswordEncoder passwordEncoder;
+
+    /**
+     * The census that makes the teardown non-vacuous — a created row nobody recorded is otherwise
+     * invisible. Every row this class creates in these three tables is created to be inspected and
+     * removed again, so each must end every test at the count it started with.
+     */
+    @BeforeEach
+    void countTheGlobalCatalogBeforeTheTest() {
+        globalRows.watch(fieldDefRepository, "fields");
+        globalRows.watch(fieldSetRepository, "field sets");
+        globalRows.watch(prioritySetRepository, "priority sets");
+    }
+
+    @AfterEach
+    void removeTheGlobalRowsThisClassCreated() {
+        globalRows.deleteAll();
+    }
 
     @Test
     void fieldSetItemOmittingBooleanFlagsBindsWithFalse() throws Exception {
@@ -48,22 +84,26 @@ class AdminUpsertBooleanFlagOmittedTest {
         var fieldBody = mockMvc.perform(post("/api/admin/fields")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"HD73-F-" + System.nanoTime() + "\",\"type\":\"TEXT\"}"))
+                        .content("{\"name\":\"HD73-F-" + Unique.token() + "\",\"type\":\"TEXT\"}"))
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         String fieldId = JsonPath.read(fieldBody, "$.id");
+        globalRows.record(fieldDefRepository, UUID.fromString(fieldId), "global field");
 
         // Item OMITS both `required` and `showOnCreate`. With a primitive boolean
         // this 400s ("Failed to read request"); with a boxed Boolean it binds false.
-        var setName = "HD73-FSET-" + System.nanoTime();
-        mockMvc.perform(post("/api/admin/field-sets")
+        var setName = "HD73-FSET-" + Unique.token();
+        var setBody = mockMvc.perform(post("/api/admin/field-sets")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"" + setName + "\",\"items\":[{\"fieldId\":\"" + fieldId + "\"}]}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.items[0].field.id").value(fieldId))
                 .andExpect(jsonPath("$.items[0].required").value(false))
-                .andExpect(jsonPath("$.items[0].showOnCreate").value(false));
+                .andExpect(jsonPath("$.items[0].showOnCreate").value(false))
+                .andReturn().getResponse().getContentAsString();
+        globalRows.record(fieldSetRepository,
+                UUID.fromString(JsonPath.read(setBody, "$.id")), "global field set " + setName);
     }
 
     @Test
@@ -83,15 +123,18 @@ class AdminUpsertBooleanFlagOmittedTest {
         // A priority set needs exactly one default; supply it via a top-level
         // marker on the first item only — but the point is the SECOND item
         // omits the flag entirely and must still bind (false).
-        var setName = "HD73-PSET-" + System.nanoTime();
-        mockMvc.perform(post("/api/admin/priority-sets")
+        var setName = "HD73-PSET-" + Unique.token();
+        var body = mockMvc.perform(post("/api/admin/priority-sets")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"" + setName + "\",\"items\":["
                                 + "{\"priorityId\":\"" + p0 + "\",\"isDefault\":true},"
                                 + "{\"priorityId\":\"" + p1 + "\"}]}"))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.name").value(setName));
+                .andExpect(jsonPath("$.name").value(setName))
+                .andReturn().getResponse().getContentAsString();
+        globalRows.record(prioritySetRepository,
+                UUID.fromString(JsonPath.read(body, "$.id")), "global priority set " + setName);
     }
 
     @Test
@@ -107,7 +150,7 @@ class AdminUpsertBooleanFlagOmittedTest {
         // A single item that omits isDefault must NOT 400 on deserialization.
         // (Whatever the service does with a set having no explicit default is a
         // business concern; the invariant under test is: omitted flag != 400.)
-        var setName = "HD73-PSET1-" + System.nanoTime();
+        var setName = "HD73-PSET1-" + Unique.token();
         var result = mockMvc.perform(post("/api/admin/priority-sets")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -120,11 +163,16 @@ class AdminUpsertBooleanFlagOmittedTest {
             throw new AssertionError("Omitted isDefault should not 400; body: "
                     + result.getResponse().getContentAsString());
         }
+        if (sc == 201) {
+            globalRows.record(prioritySetRepository,
+                    UUID.fromString(JsonPath.read(result.getResponse().getContentAsString(), "$.id")),
+                    "global priority set " + setName);
+        }
     }
 
     private String adminToken() throws Exception {
         var u = new User();
-        u.setEmail(("hd73-adm-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("hd73-adm"));
         u.setDisplayName("Admin");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);

@@ -1,6 +1,7 @@
 package com.hamstrack.auth;
 
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -10,7 +11,6 @@ import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
@@ -42,8 +42,7 @@ class RegistrationLockdownTest {
 
     @Test
     void registerIsForbiddenWhenPublicSignupDisabled() throws Exception {
-        var email = ("u-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                + "@example.com").toLowerCase();
+        var email = Unique.email("u");
         double refusedBefore = signupClosedRefusals();
 
         mockMvc.perform(post("/api/auth/register")

@@ -19,6 +19,7 @@ import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.ratelimit.RecipientMailThrottle;
 import com.hamstrack.common.security.ContentSecurityPolicy;
 import com.hamstrack.common.seed.DataSeeder;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.dto.LabelMatch;
 import com.hamstrack.issue.service.CommentService;
 import com.hamstrack.project.dto.CreateProjectRequest;
@@ -1701,8 +1702,7 @@ class RequestFieldLengthBoundTest {
 
         var ws = new Workspace();
         ws.setName("WS");
-        ws.setSlug("bound-" + UUID.randomUUID().toString().substring(0, 8) + "-"
-                   + (System.nanoTime() % 100000));
+        ws.setSlug(Unique.slug("bound"));
         ws.setCreatedBy(owner);
         ws = workspaceRepository.save(ws);
         var wm = new WorkspaceMember();
@@ -1758,8 +1758,7 @@ class RequestFieldLengthBoundTest {
 
     private User user(SystemRole role) {
         var u = new User();
-        u.setEmail(("bound-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                    + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("bound"));
         u.setDisplayName("Bound Test");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);

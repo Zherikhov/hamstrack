@@ -6,6 +6,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
@@ -435,7 +436,7 @@ class SavedFilterApiTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("u-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("u"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -446,7 +447,7 @@ class SavedFilterApiTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("ws-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("ws"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

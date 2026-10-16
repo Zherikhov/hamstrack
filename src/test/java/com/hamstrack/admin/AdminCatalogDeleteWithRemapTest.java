@@ -5,6 +5,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.Priority;
@@ -343,12 +344,12 @@ class AdminCatalogDeleteWithRemapTest {
      * one.
      */
     private String unique(String name) {
-        return name + " " + System.nanoTime();
+        return name + " " + Unique.token();
     }
 
     private User user() {
         var u = new User();
-        u.setEmail(("hd13r-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("hd13r"));
         u.setDisplayName("HD-13 Remap User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -366,8 +367,7 @@ class AdminCatalogDeleteWithRemapTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("HD-13 Remap WS");
-        w.setSlug("hd13r-" + UUID.randomUUID().toString().substring(0, 8)
-                  + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("hd13r"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

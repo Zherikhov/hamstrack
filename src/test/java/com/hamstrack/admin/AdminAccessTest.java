@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -57,7 +58,7 @@ class AdminAccessTest {
                 .andExpect(jsonPath("$[?(@.systemDefault == true)]").exists());
 
         // create → update → delete a status (unused: no remap needed)
-        var name = "T-" + System.nanoTime() % 1_000_000;
+        var name = "T-" + Unique.token();
         var created = mockMvc.perform(post("/api/admin/statuses")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -79,8 +80,10 @@ class AdminAccessTest {
     }
 
     private String loginAs(SystemRole role) throws Exception {
-        // Lowercase — login lowercases the submitted email before lookup
-        var email = ("adm-" + role + "-" + System.nanoTime() + "@example.com").toLowerCase();
+        // Lowercase — login lowercases the submitted email before lookup, and Unique.email folds
+        // with Locale.ROOT, so the ADMIN in the local part cannot become a dotless admın on a
+        // Turkish default locale
+        var email = Unique.email("adm-" + role);
         var user = new User();
         user.setEmail(email);
         user.setDisplayName("Admin Test");

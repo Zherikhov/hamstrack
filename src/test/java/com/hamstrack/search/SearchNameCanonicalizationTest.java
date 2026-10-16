@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.VersionTestBase;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
@@ -205,7 +206,7 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
     @Test
     void aStoredDoubleSpaceCatalogNameStaysReachableByBothSpellings() throws Exception {
         var ctx = newProject();
-        String tag = Long.toString(Math.abs(System.nanoTime() % 1_000_000));
+        String tag = Unique.token();
         // Unique names so nothing in the shared global catalog can answer instead.
         String statusName = "Deep  Freeze " + tag;       // NB: two spaces after "Deep"
         String typeName = "Spike  Task " + tag;
@@ -453,17 +454,17 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
     }
 
     private UUID createScopedWorkflow(Ctx ctx, UUID statusId) throws Exception {
-        return postAdmin(ctx, "/workflows", "{\"name\":\"WF-" + System.nanoTime()
+        return postAdmin(ctx, "/workflows", "{\"name\":\"WF-" + Unique.token()
                 + "\",\"statusIds\":[\"" + statusId + "\"]}");
     }
 
     private UUID createScopedPrioritySet(Ctx ctx, UUID priorityId) throws Exception {
-        return postAdmin(ctx, "/priority-sets", "{\"name\":\"PS-" + System.nanoTime()
+        return postAdmin(ctx, "/priority-sets", "{\"name\":\"PS-" + Unique.token()
                 + "\",\"items\":[{\"priorityId\":\"" + priorityId + "\",\"isDefault\":true}]}");
     }
 
     private UUID createScopedIssueTypeSet(Ctx ctx, UUID typeId) throws Exception {
-        return postAdmin(ctx, "/issue-type-sets", "{\"name\":\"TS-" + System.nanoTime()
+        return postAdmin(ctx, "/issue-type-sets", "{\"name\":\"TS-" + Unique.token()
                 + "\",\"typeIds\":[\"" + typeId + "\"]}");
     }
 
@@ -508,7 +509,7 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
 
     private void attachFieldSet(Ctx ctx, FieldDef... fields) throws Exception {
         var set = new FieldSet();
-        set.setName("Set-" + System.nanoTime());
+        set.setName("Set-" + Unique.token());
         var saved = fieldSetRepository.save(set);
         short position = 0;
         for (var field : fields) {

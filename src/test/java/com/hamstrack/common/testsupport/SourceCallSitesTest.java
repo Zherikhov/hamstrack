@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
@@ -241,6 +242,11 @@ class SourceCallSitesTest {
      * <p>Latent today and fixed anyway: {@code @Nested} appears once in the whole suite, in
      * {@code ExecutedTestClassRecorder}'s javadoc, as prose about the tree the coverage guard
      * scans. A guard installed only once a defect is live is the instance, not the category.
+     *
+     * <p><strong>A {@code @Test} inside a text block is not a test method</strong>, and this arm
+     * read one as a misplaced one until {@link #literalPositions} went in — see there for the
+     * before/after count. Planting Java source in a text block is this package's idiom for proving
+     * a scanner, so the scanner's own seals have to respect the same literal mask the scanner does.
      */
     @Test
     void everyTestAnnotationInTheSuiteSitsWhereTheParserCanAttributeIt() throws IOException {
@@ -249,9 +255,11 @@ class SourceCallSitesTest {
 
         for (var unit : SourceCallSites.unitsUnder(SourceCallSites.TEST_SOURCES, Set.of())) {
             var lines = unit.lines();
+            var quoted = literalPositions(lines);
             for (int i = 0; i < lines.size(); i++) {
                 var line = lines.get(i);
-                if (!SourceCallSites.TEST_ANNOTATION.matcher(line).find()) {
+                if (!SourceCallSites.TEST_ANNOTATION.matcher(line).find()
+                    || quoted.contains(positionKey(i + 1, line.indexOf('@') + 1))) {
                     continue;
                 }
                 annotations++;
@@ -286,12 +294,210 @@ class SourceCallSitesTest {
                 .isEmpty();
     }
 
+    /**
+     * Every {@code (line, column)} this file holds <strong>inside a literal</strong>, taken from
+     * the one literal mask in this package rather than recomputed.
+     *
+     * <p>A scan that reads source expecting <em>declarations</em> must blank its literals first,
+     * exactly as a scan that reads a build file expecting elements must blank its comments first
+     * (HD-343). This arm did not, and the suite plants Java source in text blocks in five places:
+     * a planted {@code @Test} was reported as a misplaced test method — a false red on an innocent
+     * file, which is how a seal gets switched off — and also inflated the floor's own population.
+     * Measured 2026-10-15: the annotation count falls from 2073 to 2069 with this mask in place,
+     * and the four it drops are the plants in {@code FixtureRowsTest}.
+     */
+    private static Set<Long> literalPositions(List<String> lines) {
+        var quoted = new HashSet<Long>();
+        for (var statement : SourceCallSites.statementsOf(lines)) {
+            for (var i = 0; i < statement.text().length(); i++) {
+                if (statement.literal()[i]) {
+                    quoted.add(positionKey(statement.lineOf(i), statement.columnOf(i)));
+                }
+            }
+        }
+        return quoted;
+    }
+
+    private static long positionKey(int line, int column) {
+        return line * 100_000L + column;
+    }
+
     private static int indentOf(String line) {
         int i = 0;
         while (i < line.length() && line.charAt(i) == ' ') {
             i++;
         }
         return i;
+    }
+
+    // ------------------------------------------------- statements and chains (HD-329)
+
+    /**
+     * <strong>What a statement is</strong> — the forms the splitter must see and the forms it must
+     * not, in one table, because {@code statementsOf} is now shared by a seal over the whole suite
+     * and a shared derivation trades a loud failure for a silent one.
+     */
+    @Test
+    void aStatementIsCodeOnlyAndEndsWhereTheSemicolonAtDepthZeroIs() {
+        var lines = List.of(
+                "    private void fixture() {",
+                "        // a line comment is not code",
+                "        /**",
+                "         * nor is javadoc; it mentions System.nanoTime() in prose",
+                "         */",
+                "        var name = \"WF-\" + token(); // and nor is this tail",
+                "        mockMvc.perform(post(\"/x\")",
+                "                        .content(\"{\\\"a\\\":1,\\\"b\\\":2}\"))",
+                "                .andExpect(status().isCreated());",
+                "        run(() -> { first(); second(); });",
+                "    }");
+
+        var statements = SourceCallSites.statementsOf(lines).stream()
+                .map(s -> s.text().strip()).toList();
+
+        assertThat(statements).as("the declaration, three statements and the closing brace")
+                .hasSize(5);
+        assertThat(statements.get(1)).isEqualTo("var name = \"WF-\" + token();");
+        assertThat(statements.get(1)).as("a trailing line comment is not part of the statement")
+                .doesNotContain("and nor is this tail");
+        assertThat(statements).as("javadoc prose can mention a call shape without becoming one")
+                .noneMatch(text -> text.contains("nanoTime"));
+        assertThat(statements.get(2))
+                .as("a whole MockMvc chain is ONE statement: the commas inside its JSON body are "
+                    + "inside a literal and the semicolon is the only one at depth zero")
+                .startsWith("mockMvc.perform(").endsWith("isCreated());");
+        assertThat(statements.get(3))
+                .as("a lambda body's semicolons are at paren depth 1 and do not split it")
+                .isEqualTo("run(() -> { first(); second(); });");
+    }
+
+    /** A text block's content is masked, so its semicolons and quotes are not syntax. */
+    @Test
+    void aTextBlockIsOneLiteralHoweverManyLinesItSpans() {
+        var lines = List.of(
+                "        assertThat(offenders)",
+                "                .as(\"\"\"",
+                "                    A SENTENCE; WITH A SEMICOLON AND A \"QUOTE\".",
+                "                    \"\"\")",
+                "                .isEmpty();");
+
+        var statements = SourceCallSites.statementsOf(lines);
+
+        assertThat(statements).as("the semicolon inside the text block must not split it").hasSize(1);
+        var statement = statements.get(0);
+        assertThat(statement.text()).contains("A SENTENCE; WITH A SEMICOLON");
+        assertThat(statement.literal()[statement.text().indexOf("A SENTENCE")])
+                .as("and its characters are literal, so a needle quoted there is not a call")
+                .isTrue();
+    }
+
+    /**
+     * <strong>The literal mask the attribution arm now reads, in both directions</strong> — the
+     * quoted {@code @Test} it must skip and the real misplaced one it must still name. A mask that
+     * over-reported would blind that arm everywhere instead of in one file, which is the price of
+     * consolidating a scan: one blind parser is quieter than two disagreeing ones.
+     */
+    @Test
+    void aQuotedTestAnnotationIsMaskedAndARealMisplacedOneIsNot() {
+        var lines = List.of(
+                "    @Test",
+                "    void plantsSource() {",
+                "        plant(root, \"Planted.java\", \"\"\"",
+                "                class Planted {",
+                "                    @Test",
+                "                    void looksLikeATest() {",
+                "                    }",
+                "                }",
+                "                \"\"\");",
+                "    }",
+                "        @Test",
+                "        void reallyTooDeep() {");
+
+        var quoted = literalPositions(lines);
+
+        assertThat(SourceCallSites.TEST_ANNOTATION.matcher(lines.get(4)).find())
+                .as("the planted annotation does look like one to the pattern — the mask is the "
+                    + "only thing that tells them apart")
+                .isTrue();
+        assertThat(quoted.contains(positionKey(5, lines.get(4).indexOf('@') + 1)))
+                .as("the @Test inside the text block is masked, so the arm skips it")
+                .isTrue();
+        assertThat(quoted.contains(positionKey(1, lines.get(0).indexOf('@') + 1)))
+                .as("the real one at four spaces is not masked")
+                .isFalse();
+        assertThat(quoted.contains(positionKey(11, lines.get(10).indexOf('@') + 1)))
+                .as("and nor is the real MISPLACED one at eight — masking it would retire the arm "
+                    + "silently, which is the failure this control exists for")
+                .isFalse();
+    }
+
+    /**
+     * <strong>The chain is the expression, not the statement</strong> — the table of shapes the
+     * HD-329 seal depends on. Each row names what would go wrong without it: a chain that stopped
+     * at a grouping parenthesis would miss the UUID that carries a slug, and a chain that crossed
+     * an argument comma would find a UUID in a neighbouring argument and excuse a clock-named row.
+     */
+    @Test
+    void aChainExpandsThroughGroupingParensAndStopsAtArgumentsAndAssignments() {
+        var chains = chainsAround("System.nanoTime()", List.of(
+                "        w.setSlug(\"ws-\" + UUID.randomUUID().toString().substring(0, 8)",
+                "                  + \"-\" + (System.nanoTime() % 100000));",
+                "        u.setEmail((\"u-\" + System.nanoTime() + \"@example.com\").toLowerCase());",
+                "        plant(ctx, UUID.randomUUID(), \"WF-\" + System.nanoTime(), null);",
+                "        var startedAt = System.nanoTime();",
+                "        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000;"));
+
+        assertThat(chains.get(0))
+                .as("expanded out of the parenthesised modulus, so the UUID that actually carries "
+                    + "this slug is IN the chain")
+                .isEqualTo("\"ws-\" + UUID.randomUUID().toString().substring(0, 8) + \"-\" "
+                           + "+ (System.nanoTime() % 100000)");
+        assertThat(chains.get(1))
+                .as("expanded out of the grouping parens of a lower-cased e-mail, and stopped at "
+                    + "the invocation paren of setEmail")
+                .isEqualTo("(\"u-\" + System.nanoTime() + \"@example.com\").toLowerCase()");
+        assertThat(chains.get(2))
+                .as("BOUNDED BY THE ARGUMENT COMMAS: the UUID in the previous argument must not "
+                    + "appear in this chain, or a clock-named row is excused by its neighbour")
+                .isEqualTo("\"WF-\" + System.nanoTime()");
+        assertThat(chains.get(3)).as("an assignment bounds a chain on the left")
+                .isEqualTo("System.nanoTime()");
+        assertThat(chains.get(4))
+                .as("and a difference comes back whole, so a consumer can recognise an elapsed "
+                    + "measure rather than half of one")
+                .isEqualTo("(System.nanoTime() - startedAt) / 1_000_000");
+    }
+
+    /** The positional key the HD-329 population is built on: line AND column, both 1-based. */
+    @Test
+    void aMentionCarriesTheLineAndColumnItWasFoundAt() {
+        var unit = new SourceCallSites.CompilationUnit(Path.of("Planted.java"), "Planted", List.of(
+                "    private void twoOnOneLine() {",
+                "        plant(UUID.randomUUID(), UUID.randomUUID());",
+                "    }"));
+
+        var mentions = SourceCallSites.mentions(unit, List.of("UUID.randomUUID()"));
+
+        assertThat(mentions).as("two occurrences on one line are two mentions").hasSize(2);
+        assertThat(mentions.stream().map(SourceCallSites.Mention::line)).containsExactly(2, 2);
+        assertThat(mentions.stream().map(SourceCallSites.Mention::position).distinct().count())
+                .as("and their positions differ, which is what keeps them two members of a "
+                    + "population rather than one")
+                .isEqualTo(2);
+        assertThat(mentions.get(0).column()).isEqualTo(15);
+        assertThat(mentions.get(1).column()).isEqualTo(34);
+    }
+
+    /**
+     * The chains of every occurrence of {@code needle}, with runs of whitespace collapsed: the
+     * parser joins lines without reindenting them, so a chain that spanned two source lines carries
+     * the continuation's indentation. Every consumer asks substring questions of it, so the
+     * spacing is not load-bearing — but an expectation written with it would be unreadable.
+     */
+    private static List<String> chainsAround(String needle, List<String> lines) {
+        var unit = new SourceCallSites.CompilationUnit(Path.of("Planted.java"), "Planted", lines);
+        return SourceCallSites.mentions(unit, List.of(needle)).stream()
+                .map(mention -> mention.chain().replaceAll("\\s+", " ")).toList();
     }
 
     /**

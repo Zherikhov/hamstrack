@@ -5,6 +5,8 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.FixtureRows;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.entity.PrioritySet;
@@ -22,6 +24,7 @@ import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.hamcrest.Matchers;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -46,6 +49,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 })
 @AutoConfigureMockMvc
 class DelegatedAdminBindingTest {
+
+    /** Rows this class creates in the global catalog, removed again after every test. */
+    private final FixtureRows globalRows = new FixtureRows();
 
     @Autowired MockMvc mockMvc;
     // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
@@ -122,7 +128,7 @@ class DelegatedAdminBindingTest {
         // a priority set scoped to a *different* workspace
         var otherWs = workspace(owner);
         var foreign = new PrioritySet();
-        foreign.setName("Foreign-" + System.nanoTime());
+        foreign.setName("Foreign-" + Unique.token());
         foreign.setScopeWorkspaceId(otherWs.getId());
         prioritySetRepository.save(foreign);
 
@@ -193,7 +199,7 @@ class DelegatedAdminBindingTest {
 
         // priority set private to the *other* project in the same workspace
         var priv = new PrioritySet();
-        priv.setName("Priv-" + System.nanoTime());
+        priv.setName("Priv-" + Unique.token());
         priv.setScopeProjectId(other.getId());
         prioritySetRepository.save(priv);
 
@@ -216,7 +222,7 @@ class DelegatedAdminBindingTest {
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
-        var name = "PP-" + System.nanoTime();
+        var name = "PP-" + Unique.token();
         mockMvc.perform(post(base + "/statuses")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -271,7 +277,7 @@ class DelegatedAdminBindingTest {
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
-        var name = "Dup-" + System.nanoTime();
+        var name = "Dup-" + Unique.token();
         var payload = "{\"name\":\"" + name + "\",\"category\":\"TODO\"}";
         mockMvc.perform(post(base + "/statuses").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON).content(payload))
@@ -282,9 +288,17 @@ class DelegatedAdminBindingTest {
                 .andExpect(status().isConflict());
         // same name at the *global* scope → allowed (different scope)
         var admin = adminToken();
-        mockMvc.perform(post("/api/admin/statuses").header("Authorization", "Bearer " + admin)
+        var global = mockMvc.perform(post("/api/admin/statuses").header("Authorization", "Bearer " + admin)
                         .contentType(MediaType.APPLICATION_JSON).content(payload))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        // The global row is visible to every other test on this instance and outlives the run,
+        // so it is removed again (HD-329: 118 of them had accumulated). Nothing refers to it —
+        // this test creates it to prove the scope, and never binds it to a project or an issue.
+        globalRows.record(statusRepository,
+                UUID.fromString(global.replaceAll(".*\"id\":\"([a-f0-9-]+)\".*", "$1")),
+                "global status " + name);
     }
 
     @Test
@@ -301,7 +315,7 @@ class DelegatedAdminBindingTest {
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/statuses")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"X-" + System.nanoTime() + "\",\"category\":\"TODO\"}"))
+                        .content("{\"name\":\"X-" + Unique.token() + "\",\"category\":\"TODO\"}"))
                 .andExpect(status().isForbidden());
     }
 
@@ -320,11 +334,11 @@ class DelegatedAdminBindingTest {
         // create a project-private status, then a private workflow using it
         var statusBody = mockMvc.perform(post(base + "/statuses").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"S-" + System.nanoTime() + "\",\"category\":\"TODO\"}"))
+                        .content("{\"name\":\"S-" + Unique.token() + "\",\"category\":\"TODO\"}"))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         var statusId = statusBody.replaceAll(".*\"id\":\"([a-f0-9-]+)\".*", "$1");
 
-        var wfName = "WF-" + System.nanoTime();
+        var wfName = "WF-" + Unique.token();
         mockMvc.perform(post(base + "/workflows").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"" + wfName + "\",\"statusIds\":[\"" + statusId + "\"]}"))
@@ -352,7 +366,7 @@ class DelegatedAdminBindingTest {
 
         // a status private to the *other* project
         var foreign = new Status();
-        foreign.setName("FS-" + System.nanoTime());
+        foreign.setName("FS-" + Unique.token());
         foreign.setCategory(StatusCategory.TODO);
         foreign.setScopeProjectId(other.getId());
         statusRepository.save(foreign);
@@ -360,7 +374,7 @@ class DelegatedAdminBindingTest {
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/workflows")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"WF-" + System.nanoTime() + "\",\"statusIds\":[\"" + foreign.getId() + "\"]}"))
+                        .content("{\"name\":\"WF-" + Unique.token() + "\",\"statusIds\":[\"" + foreign.getId() + "\"]}"))
                 .andExpect(status().isUnprocessableContent());
     }
 
@@ -380,7 +394,7 @@ class DelegatedAdminBindingTest {
         String globalStatusId = ((java.util.List<String>) com.jayway.jsonpath.JsonPath.read(
                 statuses, "$[?(@.name == 'To Do')].id")).get(0);
 
-        var wfName = "WF-" + System.nanoTime();
+        var wfName = "WF-" + Unique.token();
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/workflows")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -407,11 +421,11 @@ class DelegatedAdminBindingTest {
 
         var fieldBody = mockMvc.perform(post(base + "/fields").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"PF-" + System.nanoTime() + "\",\"type\":\"TEXT\"}"))
+                        .content("{\"name\":\"PF-" + Unique.token() + "\",\"type\":\"TEXT\"}"))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         var fieldId = fieldBody.replaceAll(".*\"id\":\"([a-f0-9-]+)\".*", "$1");
 
-        var setName = "FSET-" + System.nanoTime();
+        var setName = "FSET-" + Unique.token();
         mockMvc.perform(post(base + "/field-sets").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"" + setName + "\",\"items\":[{\"fieldId\":\"" + fieldId
@@ -436,7 +450,7 @@ class DelegatedAdminBindingTest {
 
         var foreign = new FieldDef();
         foreign.setKey("ff_" + Math.abs(UUID.randomUUID().hashCode()));
-        foreign.setName("FF-" + System.nanoTime());
+        foreign.setName("FF-" + Unique.token());
         foreign.setType(FieldType.TEXT);
         foreign.setScopeProjectId(other.getId());
         fieldDefRepository.save(foreign);
@@ -444,7 +458,7 @@ class DelegatedAdminBindingTest {
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/field-sets")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"FSET-" + System.nanoTime() + "\",\"items\":[{\"fieldId\":\""
+                        .content("{\"name\":\"FSET-" + Unique.token() + "\",\"items\":[{\"fieldId\":\""
                                 + foreign.getId() + "\",\"required\":false,\"showOnCreate\":true}]}"))
                 .andExpect(status().isUnprocessableContent());
     }
@@ -458,7 +472,7 @@ class DelegatedAdminBindingTest {
         projectMember(project, owner, "MANAGER");
         var token = login(owner);
 
-        var name = "PF-" + System.nanoTime();
+        var name = "PF-" + Unique.token();
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/fields")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
@@ -503,7 +517,7 @@ class DelegatedAdminBindingTest {
 
         var body = mockMvc.perform(post(base + "/statuses").header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"US-" + System.nanoTime() + "\",\"category\":\"TODO\"}"))
+                        .content("{\"name\":\"US-" + Unique.token() + "\",\"category\":\"TODO\"}"))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         var id = body.replaceAll(".*\"id\":\"([a-f0-9-]+)\".*", "$1");
 
@@ -533,7 +547,7 @@ class DelegatedAdminBindingTest {
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/admin/statuses")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"name\":\"WS-Only-" + System.nanoTime() + "\",\"category\":\"TODO\"}"))
+                        .content("{\"name\":\"WS-Only-" + Unique.token() + "\",\"category\":\"TODO\"}"))
                 .andExpect(status().isCreated());
     }
 
@@ -582,7 +596,7 @@ class DelegatedAdminBindingTest {
 
     private String adminToken() throws Exception {
         var u = new User();
-        u.setEmail(("adm-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("adm"));
         u.setDisplayName("Admin");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -590,9 +604,18 @@ class DelegatedAdminBindingTest {
         return login(userRepository.save(u));
     }
 
+    /**
+     * Nothing this class creates in the global catalog survives it. Asserted rather than
+     * attempted — {@link FixtureRows#deleteAll()} reads the row back.
+     */
+    @AfterEach
+    void removeTheGlobalRowsThisClassCreated() {
+        globalRows.deleteAll();
+    }
+
     private User user() {
         var u = new User();
-        u.setEmail(("u-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("u"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -603,7 +626,7 @@ class DelegatedAdminBindingTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("ws-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("ws"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

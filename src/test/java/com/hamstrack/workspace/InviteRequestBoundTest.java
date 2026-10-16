@@ -5,6 +5,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
@@ -235,8 +236,7 @@ class InviteRequestBoundTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("inv-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                    + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("inv"));
         u.setDisplayName("Invite Test");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -247,7 +247,7 @@ class InviteRequestBoundTest {
     private Workspace workspaceOwnedBy(User owner) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("inv-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("inv"));
         w.setCreatedBy(owner);
         w = workspaceRepository.save(w);
         var m = new WorkspaceMember();

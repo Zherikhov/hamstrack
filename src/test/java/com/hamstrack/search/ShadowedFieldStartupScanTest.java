@@ -7,6 +7,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.repository.FieldDefRepository;
@@ -284,7 +285,7 @@ class ShadowedFieldStartupScanTest {
 
     private Workspace workspace() {
         var creator = new User();
-        creator.setEmail(("scan-" + System.nanoTime() + "@example.com").toLowerCase());
+        creator.setEmail(Unique.email("scan"));
         creator.setDisplayName("Scan User");
         creator.setPasswordHash(passwordEncoder.encode("test-password-1"));
         creator.setStatus(UserStatus.ACTIVE);
@@ -293,7 +294,7 @@ class ShadowedFieldStartupScanTest {
 
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("scan-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("scan"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

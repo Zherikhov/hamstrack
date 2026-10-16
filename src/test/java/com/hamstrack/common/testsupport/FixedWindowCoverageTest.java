@@ -887,7 +887,7 @@ class FixedWindowCoverageTest {
             }
             var code = codeLines(unit);
             var bodies = SourceCallSites.bodiesByMethod(unit.type(), code);
-            var notHelpers = annotatedMethods(unit, code, NOT_A_HELPER);
+            var notHelpers = annotatedMethods(code, NOT_A_HELPER);
             var parkers = ownMethodsWhoseClosure(unit.type(), bodies, PARKS_WORK);
             var waiters = ownMethodsWhoseClosure(unit.type(), bodies, WAITS_FOR_IT);
             parkers.removeAll(notHelpers);
@@ -1032,7 +1032,7 @@ class FixedWindowCoverageTest {
         if (base == null) {
             return List.of();
         }
-        var inherited = annotatedMethods(base, codeLines(base), SETUP_ANNOTATION);
+        var inherited = annotatedMethods(codeLines(base), SETUP_ANNOTATION);
         if (inherited.isEmpty()) {
             return List.of();
         }
@@ -1090,7 +1090,7 @@ class FixedWindowCoverageTest {
     private static Map<String, String> setupCalls(SourceCallSites.CompilationUnit unit,
                                                   List<String> code, Map<String, String> bodies) {
         var out = new LinkedHashMap<String, String>();
-        for (var setup : annotatedMethods(unit, code, SETUP_ANNOTATION)) {
+        for (var setup : annotatedMethods(code, SETUP_ANNOTATION)) {
             var found = NO_ARG_CALL.matcher(bodies.getOrDefault(unit.type() + "." + setup, ""));
             while (found.find()) {
                 out.put(found.group(1), found.group(2));
@@ -1841,7 +1841,7 @@ class FixedWindowCoverageTest {
         var bodies = SourceCallSites.bodiesByMethod(unit.type(), code);
 
         var out = new LinkedHashMap<String, Closure>();
-        for (var test : annotatedMethods(unit, code, SourceCallSites.TEST_ANNOTATION)) {
+        for (var test : annotatedMethods(code, SourceCallSites.TEST_ANNOTATION)) {
             var text = closure(unit.type(), test, bodies, new LinkedHashSet<>());
             out.put(unit.type() + "#" + test,
                     new Closure(text, blocksIn(text, unit.type(), bodies, Set.of(test))));
@@ -1854,17 +1854,23 @@ class FixedWindowCoverageTest {
      * first method the attribution walk enters after it.
      *
      * <p>One walk for {@code @Test} and for {@code @BeforeEach} (arm A3), because a second copy of
-     * this five-line loop is how the two parsers {@link SourceCallSites} replaced came apart. The
-     * asymmetry it preserves is deliberate: the annotation line is matched on the RAW text, where
-     * the annotation actually is, while attribution is read from the STRIPPED text, so a declaration
-     * quoted in a comment cannot become a method.
+     * this five-line loop is how the two parsers {@link SourceCallSites} replaced came apart.
+     *
+     * <p><strong>Both halves read the STRIPPED text</strong>, and the asymmetry this javadoc used
+     * to defend — matching the annotation on the raw line, "where the annotation actually is" — was
+     * wrong in the one direction that matters: {@code VacuousVerification.strip} blanks in place, so
+     * a stripped line holds the annotation at its own column whenever it is really there, and holds
+     * spaces when it is quoted or commented. The suite plants Java source in text blocks (HD-329),
+     * and a planted {@code @Test} read as a real one adds a phantom member to this population.
+     * Latent when it was fixed — the census lines below did not move (measured 2026-10-15) — and
+     * fixed anyway, because the sibling scan in {@code SourceCallSitesTest} was <em>not</em> latent:
+     * it reported four planted annotations as misplaced test methods.
      */
-    private static Set<String> annotatedMethods(SourceCallSites.CompilationUnit unit,
-                                                List<String> code, Pattern annotation) {
+    private static Set<String> annotatedMethods(List<String> code, Pattern annotation) {
         var enclosing = SourceCallSites.enclosingMethods(code);
         var found = new LinkedHashSet<String>();
-        for (int i = 0; i < unit.lines().size(); i++) {
-            if (!annotation.matcher(unit.lines().get(i)).find()) {
+        for (int i = 0; i < code.size(); i++) {
+            if (!annotation.matcher(code.get(i)).find()) {
                 continue;
             }
             for (int j = i + 1; j < enclosing.size(); j++) {

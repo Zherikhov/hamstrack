@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.common.dto.Paging;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.LabelTestBase;
 import jakarta.validation.Constraint;
 import org.junit.jupiter.api.BeforeEach;
@@ -338,8 +339,7 @@ class ParameterConstraintSweepTest extends LabelTestBase {
         f.issueNumber = createIssue(f.ctx, "parameter sweep").get("number").asLong();
 
         var admin = new User();
-        admin.setEmail(("sweep-admin-" + System.nanoTime() + "-"
-                        + UUID.randomUUID().toString().substring(0, 6) + "@example.com").toLowerCase());
+        admin.setEmail(Unique.email("sweep-admin"));
         admin.setDisplayName("Sweep Admin");
         admin.setPasswordHash(passwordEncoder.encode("test-password-1"));
         admin.setStatus(UserStatus.ACTIVE);

@@ -3,6 +3,7 @@ package com.hamstrack.workspace;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.service.WorkspaceService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,7 +38,7 @@ class OnboardingFlowTest {
 
     @Test
     void authDoesNotSeedDemoWhenOnboardingEnabled_createTeamDoes() throws Exception {
-        var email = ("onb-" + System.nanoTime() + "@example.com").toLowerCase();
+        var email = Unique.email("onb");
         var user = new User();
         user.setEmail(email);
         user.setDisplayName("Onboarding Test");

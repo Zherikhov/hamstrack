@@ -3,6 +3,7 @@ package com.hamstrack.common.observability;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.dto.CreateWorkspaceRequest;
 import com.hamstrack.workspace.service.WorkspaceService;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -45,7 +46,7 @@ class ProductMetricsTest {
 
     private User newUser() {
         var user = new User();
-        user.setEmail("metrics-" + System.nanoTime() + "@example.com");
+        user.setEmail(Unique.email("metrics"));
         user.setDisplayName("Metrics Test");
         user.setStatus(UserStatus.ACTIVE);
         return userRepository.save(user);

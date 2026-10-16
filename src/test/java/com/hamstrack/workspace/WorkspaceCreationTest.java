@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.seed.DemoDataService;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.dto.CreateWorkspaceRequest;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import com.hamstrack.workspace.service.WorkspaceService;
@@ -71,7 +72,7 @@ class WorkspaceCreationTest {
 
     private User newUser() {
         var user = new User();
-        user.setEmail("ws-" + System.nanoTime() + "@example.com");
+        user.setEmail(Unique.email("ws"));
         user.setDisplayName("WS Test");
         user.setStatus(UserStatus.ACTIVE);
         return userRepository.save(user);

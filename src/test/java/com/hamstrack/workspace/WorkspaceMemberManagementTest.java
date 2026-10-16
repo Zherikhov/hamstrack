@@ -2,6 +2,7 @@ package com.hamstrack.workspace;
 
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.RolePermission;
@@ -1426,8 +1427,7 @@ class WorkspaceMemberManagementTest {
 
     private User user(String displayName) {
         var u = new User();
-        u.setEmail(("u-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 8)
-                + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("u"));
         u.setDisplayName(displayName);
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -1438,7 +1438,7 @@ class WorkspaceMemberManagementTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("ws-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("ws"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

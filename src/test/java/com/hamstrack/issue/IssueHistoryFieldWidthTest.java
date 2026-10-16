@@ -6,6 +6,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
@@ -301,7 +302,7 @@ class IssueHistoryFieldWidthTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("hist-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("hist"));
         u.setDisplayName("History Test");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -312,7 +313,7 @@ class IssueHistoryFieldWidthTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("hist-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("hist"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

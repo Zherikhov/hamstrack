@@ -6,6 +6,7 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.persistence.LockTimeout;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.repository.ProjectMemberRepository;
@@ -446,8 +447,7 @@ class MembershipLockTimeoutTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("lt-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 8)
-                    + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("lt"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -458,7 +458,7 @@ class MembershipLockTimeoutTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("lt-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("lt"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

@@ -8,6 +8,7 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.common.testsupport.DefaultLocale;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
@@ -254,7 +255,7 @@ class TextSearchLocaleIndependenceTest {
         var u = new User();
         // No 'I' anywhere: the account is fixture, not subject. An address folded by the code under
         // test would leave a failure here ambiguous between two different defects.
-        u.setEmail("loc-" + System.nanoTime() + "@example.com");
+        u.setEmail(Unique.email("loc"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -265,7 +266,7 @@ class TextSearchLocaleIndependenceTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("ws-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("ws"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

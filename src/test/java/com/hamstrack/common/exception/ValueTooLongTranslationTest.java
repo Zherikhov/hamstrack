@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import lombok.RequiredArgsConstructor;
@@ -144,9 +145,7 @@ class ValueTooLongTranslationTest {
 
         private Workspace blank() {
             var creator = new User();
-            creator.setEmail(("forced-" + System.nanoTime() + "-"
-                              + UUID.randomUUID().toString().substring(0, 6) + "@example.com")
-                    .toLowerCase());
+            creator.setEmail(Unique.email("forced"));
             creator.setDisplayName("Forced Violation");
             creator.setStatus(UserStatus.ACTIVE);
             creator.setSystemRole(SystemRole.USER);

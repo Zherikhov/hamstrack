@@ -5,6 +5,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.Priority;
@@ -352,12 +353,12 @@ class AdminCatalogReplacementScopeTest {
 
     /** Catalog names are unique per visible scope; the suite database is shared and reused. */
     private String unique(String name) {
-        return name + " " + (System.nanoTime() % 1_000_000);
+        return name + " " + Unique.token();
     }
 
     private User user() {
         var u = new User();
-        u.setEmail(("hd13-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("hd13"));
         u.setDisplayName("HD-13 Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -368,8 +369,7 @@ class AdminCatalogReplacementScopeTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("HD-13 WS");
-        w.setSlug("hd13-" + UUID.randomUUID().toString().substring(0, 8)
-                  + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("hd13"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

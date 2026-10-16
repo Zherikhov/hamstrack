@@ -6,6 +6,9 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.FixtureRows;
+import com.hamstrack.common.testsupport.Unique;
+import com.hamstrack.issue.repository.WorkflowRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.repository.ProjectMemberRepository;
@@ -15,6 +18,8 @@ import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import com.hamstrack.workspace.service.RoleCatalog;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -87,7 +92,11 @@ class ProseLengthBoundTest {
             "project/dto/UpdateProjectRequest.java", "description",
             "admin/dto/UpsertWorkflowRequest.java", "description");
 
+    /** Rows this class creates in the global catalog, removed again after every test. */
+    private final FixtureRows globalRows = new FixtureRows();
+
     @Autowired MockMvc mockMvc;
+    @Autowired WorkflowRepository workflowRepository;
     @Autowired RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
@@ -216,6 +225,11 @@ class ProseLengthBoundTest {
      * Admin-only, and bounded all the same: {@code /api/admin/**} needs system role ADMIN, which
      * lowers the blast radius and changes nothing about the defect — the delegated-admin tiers
      * reach the same DTO through two more mounts.
+     *
+     * <p>The accepted workflow is a row in the <strong>global</strong> catalog, where the name must
+     * be unique against every row every past run left behind, so it is recorded and removed again
+     * (HD-329: 105 of them had accumulated, and a name built from a truncated clock reading was
+     * colliding with that pile about once in a hundred runs).
      */
     @Test
     void workflowDescriptionRefusesOnePastTheBoundAndAcceptsTheBound() throws Exception {
@@ -229,11 +243,37 @@ class ProseLengthBoundTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errors.description").exists());
 
-        mockMvc.perform(post("/api/admin/workflows")
+        var created = mockMvc.perform(post("/api/admin/workflows")
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(workflowBody(statusId, "x".repeat(MAX))))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        globalRows.record(workflowRepository,
+                UUID.fromString(json.readTree(created).get("id").asText()),
+                "global workflow " + json.readTree(created).get("name").asText());
+    }
+
+    /**
+     * The census that makes the teardown below non-vacuous: forgetting to record a created row
+     * deletes nothing, asserts nothing and passes, which is how 105 of these accumulated under a
+     * green suite. This class creates workflows in exactly one test and removes that one, so the
+     * table must end every test at the count it started with.
+     */
+    @BeforeEach
+    void countTheGlobalWorkflowsBeforeTheTest() {
+        globalRows.watch(workflowRepository, "workflows");
+    }
+
+    /**
+     * Nothing this class creates in the global catalog survives it. Asserted rather than attempted:
+     * {@link FixtureRows#deleteAll()} reads the row back, so a delete blocked by a foreign key reds
+     * the test that created the row instead of being found in a row count a month later.
+     */
+    @AfterEach
+    void removeTheGlobalRowsThisClassCreated() {
+        globalRows.deleteAll();
     }
 
     // ------------------------------------------------------------------------------- fixtures
@@ -255,7 +295,7 @@ class ProseLengthBoundTest {
     }
 
     private static String workflowBody(String statusId, String description) {
-        return "{\"name\":\"WF-" + (System.nanoTime() % 1000000) + "\",\"statusIds\":[\"" + statusId
+        return "{\"name\":\"WF-" + Unique.token() + "\",\"statusIds\":[\"" + statusId
                + "\"],\"description\":\"" + description + "\"}";
     }
 
@@ -280,8 +320,7 @@ class ProseLengthBoundTest {
         var owner = user(SystemRole.USER);
         var ws = new Workspace();
         ws.setName("WS");
-        ws.setSlug("prose-" + UUID.randomUUID().toString().substring(0, 8) + "-"
-                   + (System.nanoTime() % 100000));
+        ws.setSlug(Unique.slug("prose"));
         ws.setCreatedBy(owner);
         ws = workspaceRepository.save(ws);
         var wm = new WorkspaceMember();
@@ -321,8 +360,7 @@ class ProseLengthBoundTest {
 
     private User user(SystemRole role) {
         var u = new User();
-        u.setEmail(("prose-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                    + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("prose"));
         u.setDisplayName("Prose Test");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);

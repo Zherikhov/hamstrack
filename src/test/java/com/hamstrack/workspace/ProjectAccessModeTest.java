@@ -3,6 +3,7 @@ package com.hamstrack.workspace;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.SprintTestBase;
 import com.hamstrack.workspace.entity.BuiltInRoles;
 import org.junit.jupiter.api.Test;
@@ -633,7 +634,7 @@ class ProjectAccessModeTest extends SprintTestBase {
             var role = new com.hamstrack.workspace.entity.Role();
             role.setWorkspaceId(workspaceId);
             role.setScope(RoleScope.PROJECT);
-            role.setKey(key + "-" + UUID.randomUUID().toString().substring(0, 6));
+            role.setKey(Unique.name(key));
             role.setName(key);
             role.setBuiltIn(false);
             entityManager.persist(role);

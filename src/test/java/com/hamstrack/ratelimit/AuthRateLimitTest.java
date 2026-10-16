@@ -5,6 +5,7 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.testsupport.FixedWindow;
 import com.hamstrack.common.testsupport.NoFixedWindow;
+import com.hamstrack.common.testsupport.Unique;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -39,7 +40,7 @@ class AuthRateLimitTest {
     @BeforeEach
     void createUser() {
         // Unique per test — rate-limit state is in-memory and shared across tests
-        email = "rl-" + System.nanoTime() + "@example.com";
+        email = Unique.email("rl");
         var user = new User();
         user.setEmail(email);
         user.setDisplayName("Rate Limit");

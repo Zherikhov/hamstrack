@@ -10,6 +10,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
@@ -285,7 +286,7 @@ class ShadowedFieldKeyRenameTest {
         // …and a GLOBAL row this workspace merely inherits refuses it too.
         var global = new FieldDef();
         global.setKey("hd275_inherited_" + Math.abs(UUID.randomUUID().hashCode()));
-        global.setName("Inherited " + System.nanoTime());
+        global.setName("Inherited " + Unique.token());
         global.setType(FieldType.TEXT);
         global = fieldDefRepository.saveAndFlush(global);
         try {
@@ -331,7 +332,7 @@ class ShadowedFieldKeyRenameTest {
         var ctx = fixture("team_notes", "Team notes");
         var global = new FieldDef();
         global.setKey("fixversion");           // registry-claimed; V3 seeds `fix_version`, not this
-        global.setName("Global fix version " + System.nanoTime());
+        global.setName("Global fix version " + Unique.token());
         global.setType(FieldType.TEXT);
         global.setArchivedAt(Instant.now());   // archived, so it never reaches a warning surface
         global = fieldDefRepository.saveAndFlush(global);
@@ -833,7 +834,7 @@ class ShadowedFieldKeyRenameTest {
         projectMember(project, owner);
 
         var set = new FieldSet();
-        set.setName("Set-" + System.nanoTime());
+        set.setName("Set-" + Unique.token());
         set.setScopeWorkspaceId(ws.getId());
         set = fieldSetRepository.save(set);
         project.setFieldSet(set);
@@ -888,7 +889,7 @@ class ShadowedFieldKeyRenameTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("ren-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("ren"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -898,7 +899,7 @@ class ShadowedFieldKeyRenameTest {
 
     private String instanceAdminToken() throws Exception {
         var u = new User();
-        u.setEmail(("ren-adm-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("ren-adm"));
         u.setDisplayName("Instance Admin");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -909,7 +910,7 @@ class ShadowedFieldKeyRenameTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("ren-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("ren"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

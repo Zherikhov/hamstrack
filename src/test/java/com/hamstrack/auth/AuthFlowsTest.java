@@ -9,6 +9,7 @@ import com.hamstrack.auth.repository.EmailVerificationRepository;
 import com.hamstrack.auth.repository.PasswordResetRepository;
 import com.hamstrack.auth.repository.RefreshTokenRepository;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.common.util.TokenUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,7 +28,6 @@ import jakarta.servlet.http.Cookie;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
@@ -392,8 +392,7 @@ class AuthFlowsTest {
     }
 
     private String email() {
-        return ("u-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6) + "@example.com")
-                .toLowerCase();
+        return Unique.email("u");
     }
 
     private User activeUser(String email, String password) {

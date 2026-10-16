@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -98,8 +99,7 @@ class AdminFieldConfigBoundTest {
     }
 
     private String admin() throws Exception {
-        var email = ("cfg-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                     + "@example.com").toLowerCase();
+        var email = Unique.email("cfg");
         var u = new User();
         u.setEmail(email);
         u.setDisplayName("Config Test");

@@ -7,6 +7,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.repository.ProjectMemberRepository;
@@ -257,8 +258,7 @@ public abstract class LabelTestBase {
 
     protected User user() {
         var u = new User();
-        u.setEmail(("u-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 8)
-                + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("u"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -269,7 +269,7 @@ public abstract class LabelTestBase {
     protected Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("ws-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("ws"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

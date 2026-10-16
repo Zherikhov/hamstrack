@@ -6,6 +6,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
@@ -248,7 +249,7 @@ class ShadowedFieldReportingTest {
         member(ws, owner);
         var project = project(ws, owner);
         var set = new FieldSet();
-        set.setName("Set-" + System.nanoTime());
+        set.setName("Set-" + Unique.token());
         set.setScopeWorkspaceId(ws.getId());
         set = fieldSetRepository.save(set);
         project.setFieldSet(set);
@@ -281,7 +282,7 @@ class ShadowedFieldReportingTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("shf-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("shf"));
         u.setDisplayName("Test User");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);
@@ -292,7 +293,7 @@ class ShadowedFieldReportingTest {
     private Workspace workspace(User creator) {
         var w = new Workspace();
         w.setName("WS");
-        w.setSlug("shf-" + UUID.randomUUID().toString().substring(0, 8) + "-" + (System.nanoTime() % 100000));
+        w.setSlug(Unique.slug("shf"));
         w.setCreatedBy(creator);
         return workspaceRepository.save(w);
     }

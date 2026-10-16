@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -114,8 +115,7 @@ class WorkspaceSlugLengthTest {
 
     private User user() {
         var u = new User();
-        u.setEmail(("slug-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                    + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("slug"));
         u.setDisplayName("Slug Test");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);

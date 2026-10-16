@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.repository.FieldDefRepository;
@@ -106,14 +107,14 @@ class AdminSystemFieldDeleteTest {
     private FieldDef newField() {
         var f = new FieldDef();
         f.setKey("sf_" + Math.abs(UUID.randomUUID().hashCode()));
-        f.setName("SF-" + System.nanoTime());
+        f.setName("SF-" + Unique.token());
         f.setType(FieldType.TEXT);
         return f;
     }
 
     private String adminToken() throws Exception {
         var u = new User();
-        u.setEmail(("adm-" + System.nanoTime() + "@example.com").toLowerCase());
+        u.setEmail(Unique.email("adm"));
         u.setDisplayName("Admin");
         u.setPasswordHash(passwordEncoder.encode("test-password-1"));
         u.setStatus(UserStatus.ACTIVE);

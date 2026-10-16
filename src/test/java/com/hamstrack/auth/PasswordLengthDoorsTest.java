@@ -7,6 +7,7 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.PasswordResetRepository;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.PasswordLimits;
+import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.common.util.TokenUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,7 +20,6 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
@@ -274,8 +274,7 @@ class PasswordLengthDoorsTest {
     }
 
     private static String email() {
-        return ("pw-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
-                + "@example.com").toLowerCase();
+        return Unique.email("pw");
     }
 
     private User activeUser(String password) {

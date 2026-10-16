@@ -1,6 +1,7 @@
 package com.hamstrack.ratelimit;
 
 import com.hamstrack.common.testsupport.FixedWindow;
+import com.hamstrack.common.testsupport.Unique;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -122,7 +123,6 @@ class AuthRateLimitForwardedForTrustedTest {
                 .with(r -> { r.setRemoteAddr(socket); return r; })
                 .header("X-Forwarded-For", xff)
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"email\":\"nobody-" + System.nanoTime()
-                        + "@example.com\",\"password\":\"x-wrong-pass\"}"));
+                .content("{\"email\":\"" + Unique.email("nobody") + "\",\"password\":\"x-wrong-pass\"}"));
     }
 }
