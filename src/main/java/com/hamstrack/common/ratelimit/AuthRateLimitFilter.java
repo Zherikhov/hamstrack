@@ -1,5 +1,6 @@
 package com.hamstrack.common.ratelimit;
 
+import com.hamstrack.common.exception.ProblemJson;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -28,6 +29,8 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     private final RateLimitService rateLimitService;
     // See RateLimitProperties#trustForwardedFor — default false is DC-safe.
     private final boolean trustForwardedFor;
+    /** The one writer of a problem body outside MVC — see {@link #writeTooManyRequests}. */
+    private final ProblemJson problemJson;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -110,15 +113,36 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
         return ClientIp.of(request, trustForwardedFor);
     }
 
-    // Hand-built RFC 9457 body (fields are constants — no user input): Boot 4
-    // doesn't expose an ObjectMapper bean with plain jackson-databind on the
-    // classpath, and pulling in a serializer for this would be overkill
+    /**
+     * <strong>The same document {@link com.hamstrack.common.exception.GlobalExceptionHandler#handleRateLimited}
+     * sends, rendered by the same mapper</strong> (HD-305). Until then this method built the JSON by
+     * hand, under a comment saying Boot 4 exposes no {@code ObjectMapper} bean out here — which was
+     * half true in the direction that mattered least: there is no Jackson <em>2</em> mapper bean, and
+     * the Jackson 3 one that renders every other refusal in this product is injectable like any other
+     * collaborator. Two measured consequences, both on an unauthenticated door:
+     *
+     * <ul>
+     *   <li>the body went out through {@link HttpServletResponse#getWriter()} with no charset set, so
+     *       Tomcat's ISO-8859-1 default encoded the em dash in the only sentence it carries as a
+     *       literal {@code ?};</li>
+     *   <li>{@code e.getMessage()} was interpolated into JSON unescaped. The hazard was
+     *       <strong>structural rather than live</strong>, and the reason is control flow rather than
+     *       the text any throw site composes: the {@code catch} above wraps exactly one call,
+     *       {@code rateLimitService.checkAuthRequestAllowed(clientIp)}, and <em>not</em>
+     *       {@code filterChain.doFilter}. So the only exceptions that interpolation could ever see
+     *       are {@code RateLimitService}'s own two, both raised through the numeric constructor with
+     *       the default message; a {@code RateLimitedException} composed with text elsewhere
+     *       ({@code RecipientMailThrottle}, {@code IssueRankService}) unwinds past this filter to
+     *       {@code GlobalExceptionHandler}, where Jackson escapes it, and could not have reached it
+     *       whatever it carried. What was missing was not safety but anything holding it: a second
+     *       {@code catch}, or a {@code try} widened over the chain, would have been enough.</li>
+     * </ul>
+     *
+     * <p>{@link com.hamstrack.common.exception.ProblemJson} owns status, content type, charset,
+     * length and body; the {@code Retry-After} is this door's own, which is why it is set here.
+     */
     private void writeTooManyRequests(HttpServletResponse response, RateLimitedException e) throws IOException {
-        response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
         response.setHeader(HttpHeaders.RETRY_AFTER, String.valueOf(e.getRetryAfterSeconds()));
-        response.setContentType("application/problem+json");
-        response.getWriter().write("""
-                {"type":"about:blank","title":"Too Many Requests","status":429,\
-                "detail":"%s"}""".formatted(e.getMessage()));
+        problemJson.write(response, e.problemDetail());
     }
 }

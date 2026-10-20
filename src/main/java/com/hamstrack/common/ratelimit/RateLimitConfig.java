@@ -1,6 +1,7 @@
 package com.hamstrack.common.ratelimit;
 
 import com.hamstrack.common.config.RateLimitProperties;
+import com.hamstrack.common.exception.ProblemJson;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,9 +12,10 @@ public class RateLimitConfig {
 
     @Bean
     public FilterRegistrationBean<AuthRateLimitFilter> authRateLimitFilter(
-            RateLimitService rateLimitService, RateLimitProperties properties) {
+            RateLimitService rateLimitService, RateLimitProperties properties,
+            ProblemJson problemJson) {
         var registration = new FilterRegistrationBean<>(
-                new AuthRateLimitFilter(rateLimitService, properties.trustForwardedFor()));
+                new AuthRateLimitFilter(rateLimitService, properties.trustForwardedFor(), problemJson));
         // Endpoints where unlimited attempts enable brute force or mail spam;
         // /refresh and /logout are cookie-driven and excluded on purpose
         registration.addUrlPatterns(

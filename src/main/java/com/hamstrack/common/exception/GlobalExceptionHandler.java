@@ -120,14 +120,19 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(AppException.class)
     public ResponseEntity<ProblemDetail> handleAppException(AppException ex) {
-        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
-        return ResponseEntity.status(ex.getStatus()).body(problem);
+        return ResponseEntity.status(ex.getStatus()).body(ex.problemDetail());
     }
 
-    // More specific than the AppException handler — adds the Retry-After hint
+    /**
+     * More specific than the AppException handler — adds the {@code Retry-After} hint.
+     *
+     * <p>The document comes from {@link AppException#problemDetail()} because this 429 has a second
+     * writer: {@code AuthRateLimitFilter} refuses before the dispatcher and renders the same
+     * exception itself (HD-305).
+     */
     @ExceptionHandler(RateLimitedException.class)
     public ResponseEntity<ProblemDetail> handleRateLimited(RateLimitedException ex) {
-        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        var problem = ex.problemDetail();
         return ResponseEntity.status(ex.getStatus())
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
                 .body(problem);

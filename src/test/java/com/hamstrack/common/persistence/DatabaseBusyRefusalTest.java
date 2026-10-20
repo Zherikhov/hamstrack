@@ -43,8 +43,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  * answered 500 a starved instance was asked again by every open tab.
  *
  * <p>The bodies are asserted <strong>byte-identical</strong> rather than merely equivalent, because
- * one of them is hand-built — Boot 4 exposes no {@code ObjectMapper} bean in a filter — and two
- * hand-written copies of one JSON document is the defect this ticket is otherwise about.
+ * one of them is a precomputed constant rather than a rendering — written after {@code reset()}
+ * with an explicit {@code Content-Length}, and <em>not</em> because a filter has no serializer
+ * available to it: it has one, {@code ProblemJson} injects the mapper MVC renders with and the two
+ * sibling pre-dispatch doors write through it (HD-305, which corrected that reason here and in
+ * {@code DatabaseBusyRefusal}). Two copies of one JSON document drifting apart is the defect this
+ * ticket is otherwise about, whichever way each copy was produced.
  */
 @SpringBootTest(properties = {
         "spring.datasource.hikari.maximum-pool-size=" + PoolStarvedBase.POOL_SIZE,
@@ -159,7 +163,10 @@ class DatabaseBusyRefusalTest extends PoolStarvedBase {
     /**
      * <strong>One refusal, two writers, and exactly one permitted difference between them.</strong>
      * The advice renders a {@code ProblemDetail} through the MVC message converters; the filter
-     * writes bytes it built itself, because Boot 4 has no {@code ObjectMapper} bean out there.
+     * writes bytes it built itself — see {@code DatabaseBusyRefusal}'s class javadoc for why it
+     * still does so now that {@code ProblemJson} exists (HD-305 corrected the reason that used to
+     * be given here: there is no Jackson 2 {@code ObjectMapper} bean, but the Jackson 3 mapper MVC
+     * renders with is one).
      * Compared as whole documents rather than parsed, so that a change to Jackson's field order, to
      * Spring's {@code ProblemDetail} shape, or to the response encoding fails here rather than
      * reaching a caller who now sees two different documents for one condition.

@@ -9972,18 +9972,23 @@ components:
         because more than one thing here writes a problem document: one rendered
         by the application carries `instance` (the request path, filled in on the
         way out) and leaves `type` unset, while one written before a request
-        reaches the application — a refusal from a servlet filter, such as the
-        per-IP auth `429` or `DatabaseBusy` — carries less, since a filter has no
-        serializer behind it and hand-escaping a caller-supplied path into a
-        hand-built document is not a thing worth owning. Nothing that matters
-        differs: the `status`, the `detail`, any `errorType` and any
+        reaches the application's dispatcher — by a servlet filter or the
+        security chain rather than by an endpoint — also leaves `type` unset but
+        carries no `instance`, since nothing outside the dispatcher knows the
+        path that is filled in on the way out and a door in front of it would
+        have to hand-escape a caller-supplied string into a document, which is
+        not a thing worth owning. That is the only way such a body is shorter:
+        whichever door writes a refusal, it is rendered by the same serializer,
+        so the member names and their order, `application/problem+json` and
+        UTF-8 do not differ. Nothing that matters differs: the `status`, the `detail`, any `errorType` and any
         `Retry-After` are identical either way.
       properties:
         type:
           type: string
           description: >-
-            Absent from an application-rendered body, where RFC 9457 reads that
-            absence as `about:blank`. Not a member to branch on.
+            Absent from every body this API writes, wherever it is written;
+            RFC 9457 reads that absence as `about:blank`. Not a member to branch
+            on.
           example: 'about:blank'
         title: { type: string, example: Conflict }
         status: { type: integer, example: 409 }
@@ -9992,7 +9997,8 @@ components:
           type: string
           description: >-
             The request path, filled in by the application as it serialises the
-            body, and absent from a body written by a filter. It discloses
+            body, and absent from a body written before the request reaches the
+            application's dispatcher (a filter, the security chain). It discloses
             nothing either way — it is the caller's own request path — and is
             not a member to branch on.
           example: /api/auth/login

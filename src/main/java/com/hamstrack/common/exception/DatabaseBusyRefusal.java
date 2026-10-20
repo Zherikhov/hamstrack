@@ -21,11 +21,23 @@ import java.util.Map;
  * <p>Two writers, one refusal. {@link GlobalExceptionHandler#handleDatabaseBusy} answers a failure
  * that reached a handler method, and renders a {@link ProblemDetail} through the MVC message
  * converters; {@link DatabaseBusyFilter} answers one that unwound through the filter chain without
- * ever reaching the dispatcher, and has to write the bytes itself — Boot 4 exposes no
- * {@code ObjectMapper} bean out there, exactly as {@code AuthRateLimitFilter} records. Two
- * hand-written copies of one JSON body is the defect this ticket is otherwise about, so every value
- * that goes on the wire is a constant here, and {@code DatabaseBusyRefusalTest} pins the two
- * renderings against each other character-for-character.
+ * ever reaching the dispatcher, and writes the bytes itself. Two hand-written copies of one JSON
+ * body is the defect this ticket is otherwise about, so every value that goes on the wire is a
+ * constant here, and {@code DatabaseBusyRefusalTest} pins the two renderings against each other
+ * character-for-character.
+ *
+ * <p><strong>Why this class still frames its own response now that {@link ProblemJson} exists</strong>
+ * (HD-305). The reason originally given here and in {@code AuthRateLimitFilter} — "Boot 4 exposes no
+ * {@code ObjectMapper} bean out there" — was true only of Jackson <em>2</em>: the Jackson 3
+ * {@code JsonMapper} that renders every other refusal in this product is a bean, and the two doors
+ * that hand-built their bodies now take it through {@code ProblemJson}. This one keeps its own
+ * write because its body is a <strong>precomputed constant</strong> with a {@code Content-Length},
+ * written onto a response it has just {@code reset()} with the security block restored around it —
+ * and because that constant is what {@code DatabaseBusyRefusalTest} pins against MVC's own
+ * rendering under a genuinely starved pool. {@code ProblemJsonWriterContractTest} holds the
+ * constant equal to what {@code ProblemJson} renders from {@link #problemDetail()}, so the two
+ * mechanisms cannot drift apart without a red build, and that site is the one declared exception to
+ * "a response body is framed by {@code ProblemJson}, nowhere else".
  *
  * <p><strong>Everything this class puts in the body is a compile-time constant, and that is the
  * security property.</strong> This refusal is reachable unauthenticated, so an anonymous caller
@@ -57,9 +69,15 @@ public final class DatabaseBusyRefusal {
             + "moment.";
 
     /**
-     * The body as bytes, for the writer that has no serializer: <strong>character-for-character what
-     * MVC renders from {@link #problemDetail()}, minus one member — and the omission is the only
-     * difference either writer is allowed to have</strong>. Field order, the absent {@code type}
+     * The body as a <strong>precomputed constant</strong>, written onto a response this door has
+     * just {@code reset()} and framed with an explicit {@code Content-Length} — not because
+     * anything out here lacks a serializer. It has one: {@code ProblemJson} injects the very
+     * {@code JsonMapper} MVC renders with, and the two sibling pre-dispatch doors use it (HD-305).
+     * What this constant is for is the comparison: <strong>character-for-character what MVC renders
+     * from {@link #problemDetail()}, minus one member — and the omission is the only difference
+     * either writer is allowed to have</strong>. {@code ProblemJsonWriterContractTest} asserts that
+     * equality on every run, cheaply, which is what makes a literal here safer than a second
+     * rendering rather than merely shorter. Field order, the absent {@code type}
      * (Spring omits {@code about:blank}) and the trailing {@code errorType} are all copied from what
      * the advice actually produces rather than from what a problem document usually looks like;
      * {@code DatabaseBusyRefusalTest} compares the two and fails if a Spring or Jackson upgrade
@@ -142,12 +160,24 @@ public final class DatabaseBusyRefusal {
      * predict it. {@code HeaderWriterFilter} writes its block in a {@code finally}, so the headers
      * <em>are</em> on the response when the acquisition failure unwinds past it — and then
      * {@code DatabaseBusyFilter} calls {@link HttpServletResponse#reset()}, which takes them off
-     * again, correctly and for its own good reason. Without restoring them, one response in this
-     * product ships with no {@code nosniff}, no frame refusal and no cache directive, and the
-     * reverse proxy adds none either. The impact is small — the body is a constant
-     * {@code application/problem+json} with nothing caller-derived in it, and a 503 is not
-     * heuristically cacheable — but a product invariant that holds on every response except one is
-     * not a small thing to leave unstated.
+     * again, correctly and for its own good reason. Without restoring them this response ships with
+     * no {@code nosniff}, no frame refusal and no cache directive, and the reverse proxy adds none
+     * either.
+     *
+     * <p><strong>A refusal written before the security chain carries no block unless it restores
+     * one; this door restores it because {@code reset()} took one off that it had.</strong> That is
+     * a property of where a response is written, and it is deliberately not phrased as a count of
+     * exceptions — a count goes stale one entry before its list does. The pre-chain doors are three:
+     * this one at {@code HIGHEST_PRECEDENCE + 2}, and the two budget refusals at
+     * {@code HIGHEST_PRECEDENCE} ({@code AuthRateLimitFilter}'s 429 and
+     * {@code CspReportGuardFilter}'s 413/429). Measured off the wire against the running
+     * application on 2026-10-18: this door restores the block, and the other two carry none of it —
+     * they never had one to lose, which is a different state from this one's, not the same gap. So
+     * what this map closes is the gap a {@code reset()} opens, nothing wider. The impact it closes
+     * is itself modest — the body is a constant {@code application/problem+json} with nothing
+     * caller-derived in it, and a 503 is not heuristically cacheable — but a response written behind
+     * the chain and then stripped is indistinguishable from one written in front of it unless
+     * somebody puts the headers back.
      *
      * <p>These values are Spring Security's own defaults, copied, which is a second copy of
      * somebody else's decision and is only acceptable because the copy is <em>sealed</em>:
