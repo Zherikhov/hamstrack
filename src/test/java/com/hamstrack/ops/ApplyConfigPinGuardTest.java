@@ -15,7 +15,10 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -644,6 +647,386 @@ class ApplyConfigPinGuardTest {
         // needed the same one permitted difference and would otherwise have been red for a
         // divergence this test had already decided was fine.
         return ScriptHarness.comparableFunctionBody(script, "read_image_tag");
+    }
+
+    // --- the pin examples ops PROSE carries, and the fixtures that reproduce them ------
+
+    /** What a concrete {@code <pin variable>=…} example in an ops script's prose is for. */
+    private enum PinExample {
+        /**
+         * A live line under {@code src/test/java} names the pin variable AND this exact value on
+         * one physical line. <strong>That co-occurrence is the whole of what is enforced</strong>,
+         * and it is weaker than "a fixture feeds this string to the parser": it cannot tell an
+         * input from an argument, nor either from prose inside a text block.
+         *
+         * <p>Three of the four declared members are the strong reading — {@code v0.16.3} and
+         * {@code 9.9.9} are {@code .env}-line shapes a row really does feed to the parse, and
+         * {@code 0.17.0} is the pin the four-step ordering fixture writes. <strong>{@code latest}
+         * is the member where the two readings diverge</strong>, and it is named here rather than
+         * left for a reader to discover: {@code apply-config.sh:631} QUOTES a historical bad
+         * refusal message rather than illustrating an {@code .env} line, and its witness at
+         * {@code :177} is the process-environment override argument, not a parsed string. Nothing
+         * about that is wrong for the build — no sweeper is coming for the word {@code latest} —
+         * but reword that historical quote and the red you get will be about a coupling that was
+         * never a parser example. Move the declaration with it, or drop both.
+         */
+        REPRODUCED,
+        /**
+         * A release line a reader copies into their own {@code .env}. Nothing feeds it anywhere, so
+         * a sweep onto the current line is correct and is what keeps the instruction true.
+         */
+        SWEPT,
+        /** A metavariable ({@code <the last good tag>}, {@code sha-<7>}) — no value to agree about. */
+        PLACEHOLDER
+    }
+
+    /**
+     * The couplings, and only the couplings: {@code <script>|<value>} for every pin example in ops
+     * prose that a fixture reproduces. Declared rather than derived, because the derived form of
+     * this question answers itself — a population found BY the co-occurrence cannot then be asked
+     * whether the two sides co-occur.
+     *
+     * <p>Deliberately NOT a declaration of the whole partition. {@code APP_IMAGE_TAG=0.18} in
+     * {@code apply-config.sh} is a release line a reader copies, nothing reproduces it, and
+     * sweeping it to the next line is what keeps the instruction true: recording it here by value
+     * would red the build on that correct sweep, and a seal that reds on the right answer gets
+     * deleted. So the rule is one-directional and exact in both directions anyway — anything a
+     * fixture reproduces must be named here, and anything named here must still be reproduced.
+     *
+     * <p><strong>That {@code APP_IMAGE_TAG=0.18} two lines above is a live negative control, and
+     * it is load-bearing where it sits — do not "tidy" it into prose.</strong> This javadoc is
+     * under {@code src/test/java}, so the value is a candidate witness for itself; it classifies
+     * {@code SWEPT} on every green run only because {@link #liveTestLines} drops javadoc. The day
+     * that filter stops dropping javadoc, this line becomes a witness, {@code 0.18} flips to
+     * {@code REPRODUCED} and the seal reds as an undeclared coupling. The comment filter therefore
+     * polices itself, permanently and at zero cost, as long as this example keeps being written
+     * out in full rather than described.
+     *
+     * <p>No entry carries a written reason. Each one is re-derived on every run; a disagreement in
+     * either direction is the finding, and the live count is computed by the failure message.
+     *
+     * <p>The script is part of the key because the witness is found by value alone, so dropping it
+     * would let one fixture line answer for two different scripts' comments (the granularity
+     * control at the end of the seal fires if that ever becomes possible).
+     */
+    private static final Set<String> DECLARED_COUPLED_PIN_EXAMPLES = Set.of(
+            "ops/deploy/apply-config.sh|0.17.0",
+            "ops/deploy/apply-config.sh|9.9.9",
+            "ops/deploy/apply-config.sh|latest",
+            "ops/drift/hamstrack-config-drift.sh|v0.16.3");
+
+    /**
+     * <strong>HD-335 — a comment and the test fixture that justifies leaving it alone agreed only
+     * by editorial care.</strong>
+     *
+     * <p>{@code ops/drift/hamstrack-config-drift.sh:255} spells {@code export APP_IMAGE_TAG=v0.16.3}
+     * in prose, and {@link #theEnvPinIsParsedTheWayComposeParsesIt} feeds that exact string to the
+     * parser as its {@code export prefix} row. Two reviewers correctly declined to sweep the comment
+     * onto the current release line, and both gave a reason that was not load-bearing: the line sits
+     * between {@code write_metrics()} (which closes at 241) and {@code read_image_tag()} (which opens
+     * at 272), so {@link ScriptHarness#comparableFunctionBody} — the only text comparison between the
+     * two scripts — cannot reach it, and changing the value to a current release string was measured
+     * to red nothing at all.
+     *
+     * <p><strong>Why the population is derived from the SCRIPTS and the partition is declared.</strong>
+     * A population derived from the co-occurrence itself cannot be asked whether the two sides
+     * co-occur, and a population derived from "a version-shaped literal in both an ops script and an
+     * ops test" was measured to be unusable: 62 such {@code (file, value)} pairs exist, most of them
+     * documentation section numbers ({@code §5.5.3}, {@code §4.7}) that a version regex cannot tell
+     * from a version, and the containment test is contaminated by substrings — {@code 6.3} in the
+     * drift script resolves to {@link #theEnvPinIsParsedTheWayComposeParsesIt}'s row by matching the
+     * INSIDE of {@code v0.16.3}. The anchor is therefore the PARSER rather than the shape of the
+     * value — the variable name is read out of {@code read_image_tag}'s own body, and a candidate is
+     * a value in a comment line that (a) is assigned to that variable anywhere under {@code ops/},
+     * or (b) is version-shaped in a script that defines that parser. Arm (b) exists because the
+     * coupling is not always written as an assignment: {@code apply-config.sh:580} narrates
+     * "production is pinned to 0.17.0 for an incident" and
+     * {@link #allowPinnedOverridesOneRunAndAdoptPinOverridesThePin} walks those four steps with
+     * {@code 0.17.0} as its fixture, which arm (a) cannot see. Status is then re-derived for every
+     * candidate, and only the couplings are declared.
+     *
+     * <p>That keeps the honest third answer to "illustration or provenance?". A measurement
+     * provenance ({@code measured on Compose v5.1.0}, {@code Engine 25.0.16}) is prose on BOTH
+     * sides and is nobody's fixture: it stays a candidate, derives as nothing-reproduces-it, needs
+     * no declaration, and is free to be re-measured — demanding that two independent records of one
+     * measurement agree would be meaningless. The discriminator is proven to answer both ways on
+     * the live population by the floors below: members must exist on BOTH sides of it.
+     */
+    @Test
+    void everyPinExampleInOpsProseDeclaresWhetherAFixtureReproducesIt() throws IOException {
+        var scripts = filesUnder(Path.of("ops"), ".sh");
+        var tests = filesUnder(Path.of("src/test/java"), ".java");
+        var liveLines = liveTestLines(tests);
+        var variables = pinVariables(scripts);
+
+        var problems = new ArrayList<String>();
+        var derived = new TreeMap<String, PinExample>();
+        var witnesses = new TreeMap<String, String>();
+        int placeholders = 0;
+        var reproducingScripts = new HashSet<String>();
+
+        // A version-shaped token. The lookarounds also delete every dotted quad for free: no arm of
+        // `\d+\.\d+(\.\d+)?` survives inside 127.0.0.1 or 169.254.169.254, because each candidate
+        // run is adjacent to another `.`-digit — so an IP literal is not a version here by
+        // construction rather than by an exclusion somebody has to maintain.
+        var versionShaped = Pattern.compile("(?<![\\w.])v?\\d+\\.\\d+(?:\\.\\d+)?(?![\\w.])");
+        int versionCandidates = 0;
+
+        for (Path script : scripts) {
+            var rel = posixRelative(script);
+            var carriesTheParser = Files.readString(script, StandardCharsets.UTF_8).contains("read_image_tag() {");
+            var lines = Files.readAllLines(script, StandardCharsets.UTF_8);
+            for (int i = 0; i < lines.size(); i++) {
+                var line = lines.get(i);
+                if (!line.stripLeading().startsWith("#")) {
+                    continue;   // a value the script USES is not prose about the value
+                }
+                var candidates = new ArrayList<String>();
+                // (a) assigned to the parsed variable, in any ops script.
+                for (String variable : variables) {
+                    var m = Pattern.compile("(?<![A-Z0-9_])" + Pattern.quote(variable) + "=(\\S+)").matcher(line);
+                    while (m.find()) {
+                        candidates.add(m.group(1).replaceAll("[`'\",.;)\\]]+$", ""));
+                    }
+                }
+                // (b) version-shaped, in a script that defines the parser — the coupling is not
+                //     always written as an assignment (apply-config.sh:580 narrates a pin instead).
+                if (carriesTheParser) {
+                    var m = versionShaped.matcher(line);
+                    while (m.find()) {
+                        candidates.add(m.group());
+                        versionCandidates++;
+                    }
+                }
+                for (String value : candidates) {
+                    var key = rel + "|" + value;
+                    if (value.contains("<") || value.contains(">") || value.contains("$")) {
+                        derived.put(key, PinExample.PLACEHOLDER);
+                        placeholders++;
+                        continue;
+                    }
+                    var witness = liveWitness(variables, value, liveLines);
+                    if (witness != null) {
+                        derived.put(key, PinExample.REPRODUCED);
+                        witnesses.put(key, witness);
+                        reproducingScripts.add(rel);
+                    } else if (derived.get(key) != PinExample.REPRODUCED) {
+                        derived.put(key, PinExample.SWEPT);
+                        witnesses.put(key, "named at " + rel + ":" + (i + 1)
+                                + ", and no live line under src/test/java names "
+                                + String.join("/", variables) + " and " + value + " together");
+                    }
+                }
+            }
+        }
+
+        for (var e : derived.entrySet()) {
+            if (e.getValue() == PinExample.REPRODUCED && !DECLARED_COUPLED_PIN_EXAMPLES.contains(e.getKey())) {
+                problems.add("  NEW COUPLING, undeclared: " + e.getKey()
+                        + " — reproduced at " + witnesses.get(e.getKey()));
+            }
+        }
+        for (var key : DECLARED_COUPLED_PIN_EXAMPLES) {
+            if (!derived.containsKey(key)) {
+                problems.add("  GONE from the scripts: " + key + " is declared as a coupling and no"
+                        + " ops script's prose carries that example any more — it was swept, reworded"
+                        + " or deleted while its fixture stayed behind");
+            } else if (derived.get(key) != PinExample.REPRODUCED) {
+                problems.add("  NOT REPRODUCED: " + key + " is declared as a coupling but "
+                        + witnesses.get(key));
+            }
+        }
+
+        // Floors. Two of them — `reproduced` and `reproducingScripts` — sit EXACTLY at the live
+        // value, so they refuse any shrink at all, not merely an empty or one-sided population: a
+        // correct, coordinated retirement (prose and fixture moved together, entry dropped) reds
+        // here and forces a deliberate edit. That is the intent, and saying it as "empty or
+        // one-sided" would understate what the next reader is about to hit. `swept` (floor 5
+        // against a live 14) and the arm-(b) candidate floor (20 against a live 36) have real
+        // margin and refuse only a predicate that stopped matching.
+        var reproduced = derived.values().stream().filter(v -> v == PinExample.REPRODUCED).count();
+        var swept = derived.values().stream().filter(v -> v == PinExample.SWEPT).count();
+        if (scripts.size() < 12 || tests.size() < 50) {
+            problems.add("  FLOOR: scanned " + scripts.size() + " ops scripts and " + tests.size()
+                    + " test sources — the walk found far less than this repository has, so the"
+                    + " partition below was computed over the wrong tree");
+        }
+        if (variables.size() != 1) {
+            problems.add("  FLOOR: read_image_tag() parses " + variables + " — the population is"
+                    + " anchored on the variable the parser itself reads, so an empty or widened"
+                    + " set means the anchor moved, not that there are no examples");
+        }
+        if (versionCandidates < 20) {
+            problems.add("  FLOOR: arm (b) matched " + versionCandidates + " version-shaped tokens in"
+                    + " the comments of the scripts that define read_image_tag. Those two carry dozens"
+                    + " of measurement provenances, so a small number means the pattern stopped"
+                    + " matching and the couplings written as NARRATIVE rather than as an assignment"
+                    + " (apply-config.sh:580) went unseen");
+        }
+        if (derived.size() < 15 || reproduced < 4 || swept < 5 || placeholders < 1
+                || reproducingScripts.size() < 2) {
+            problems.add("  FLOOR: " + derived.size() + " examples (" + reproduced + " reproduced across "
+                    + reproducingScripts.size() + " script(s), " + swept + " swept, " + placeholders
+                    + " placeholders). The discriminator must stay able to answer BOTH ways on the"
+                    + " live population, so the reproduced-side floors sit AT the live value and"
+                    + " refuse any shrink — including a correct, coordinated retirement, which is"
+                    + " meant to be a deliberate edit here and not a quiet one");
+        }
+        // GRANULARITY CONTROL. The member is (script, value) while the witness is found by value
+        // alone, so one fixture line would answer for two scripts' couplings. Scoped to the
+        // REPRODUCED members on purpose: a SWEPT one has no witness to share, and two scripts
+        // recording the SAME MEASUREMENT (`29.2.1`, `6.4` and `v5.1.0` are each in both today) is
+        // the normal, correct state this control must not mistake for a shared witness.
+        var coupled = derived.entrySet().stream()
+                .filter(e -> e.getValue() == PinExample.REPRODUCED).map(Map.Entry::getKey).toList();
+        if (coupled.size() != coupled.stream().map(k -> k.substring(k.indexOf('|') + 1))
+                .distinct().count()) {
+            problems.add("  GRANULARITY: two ops scripts are now coupled to the same value, so ONE"
+                    + " fixture line satisfies both of their comments and either could be swept"
+                    + " with this seal still green. Find the witness per script, or declare why one"
+                    + " fixture documents both");
+        }
+
+        assertThat(problems)
+                .withFailMessage("""
+
+                        A concrete %s=… example in an ops script's PROSE is not a published-tag claim. It is
+                        the SHAPE of an .env line that script's own read_image_tag() parses, and a test
+                        reproduces that exact string to document it -- so MOVE BOTH OR NEITHER. If you are
+                        sweeping version strings onto the current release line, these are not among them.
+                        (What is checked is co-occurrence: the variable and the value on ONE live line.)
+                        Nothing else holds the pair: hamstrack-config-drift.sh:255 sits between write_metrics()
+                        (closes 241) and read_image_tag() (opens 272), so the one text comparison between the
+                        two scripts cannot see it (HD-335).
+
+                        Only the COUPLINGS are declared (DECLARED_COUPLED_PIN_EXAMPLES). An example a fixture
+                        reproduces must be named there; one nothing reproduces -- a release line a reader
+                        copies, or a metavariable -- is deliberately not, so a correct sweep of THOSE stays
+                        green. Which side you are on is re-derived every run:
+                          GONE            the prose example vanished while its fixture stayed. You swept it:
+                                          put it back, or change the fixture in the SAME edit and re-declare.
+                          NOT REPRODUCED  the prose is still there and no live line names the variable and
+                                          the value TOGETHER any more. Three repairs, in order of how often
+                                          it is each: put the two back on one physical line (a fixture split
+                                          across lines, or built by concatenation, reads as absent here --
+                                          the witness text below says which line was looked at); restore the
+                                          fixture if it was deleted or renamed; or drop the entry and accept
+                                          that the comment is now an unproven claim.
+                          NEW COUPLING    a fixture now depends on prose nobody recorded. Declare it, so the
+                                          next sweeper is told before they edit rather than after.
+                        Re-point the scan rather than deleting an entry. The reproduced-side floors sit at
+                        the live value and refuse ANY shrink, including a correct retirement.
+
+                        %s
+
+                        The whole derived population, for comparison:
+                        %s
+                        """, String.join("/", variables), String.join("\n", problems),
+                        partition(derived, witnesses))
+                .isEmpty();
+    }
+
+    /**
+     * Every derived member with its status and its witness. Printed on failure because the honest
+     * place for a live count — and for the set an exemption admits — is the message that computes
+     * it, never a number in a javadoc beside the list.
+     */
+    private static String partition(Map<String, PinExample> derived, Map<String, String> witnesses) {
+        var sb = new StringBuilder();
+        derived.forEach((key, kind) -> sb.append("  ").append(kind).append("  ").append(key)
+                .append(witnesses.containsKey(key) ? "  <- " + witnesses.get(key) : "")
+                .append('\n'));
+        return sb.toString();
+    }
+
+    /** Every file under {@code root} with the given suffix, in a stable order. */
+    private static List<Path> filesUnder(Path root, String suffix) throws IOException {
+        assertThat(root)
+                .withFailMessage("%s was not found — this seal reads the repository's own tree, so it "
+                        + "must run from the module root", root.toAbsolutePath())
+                .isDirectory();
+        try (var walk = Files.walk(root)) {
+            return walk.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().endsWith(suffix))
+                    .sorted()
+                    .toList();
+        }
+    }
+
+    /**
+     * The variable {@code read_image_tag} itself parses, read out of the function body rather than
+     * written down here: the examples in prose are examples OF THAT PARSE, so the anchor has to
+     * come from the parse. Reuses {@link ScriptHarness#functionBody}, which is the extraction the
+     * neighbouring seals already trust.
+     */
+    private static Set<String> pinVariables(List<Path> scripts) throws IOException {
+        var found = new HashSet<String>();
+        for (Path script : scripts) {
+            if (!Files.readString(script, StandardCharsets.UTF_8).contains("read_image_tag() {")) {
+                continue;
+            }
+            var m = Pattern.compile("([A-Z][A-Z0-9_]{2,})\\[\\[:space:\\]\\]\\*=")
+                    .matcher(ScriptHarness.functionBody(script, "read_image_tag"));
+            while (m.find()) {
+                found.add(m.group(1));
+            }
+        }
+        return found;
+    }
+
+    /** One line of a test source that is not javadoc and not a {@code //} comment. */
+    private record TestLine(String ref, String content) {}
+
+    /**
+     * Every non-prose line of every test source, read once. {@code //}, {@code /*} and continuation
+     * {@code *} lines are dropped because a value a test merely TALKS about is not a fixture.
+     *
+     * <p>What this cannot see: a line inside a text block is live, so a value named only in a
+     * failure message would read as reproduced. Measured example of exactly that shape —
+     * {@code ConfigDriftContainerOracleTest:1328} carries {@code Engine 25.0.16} inside a
+     * {@code withFailMessage} block while {@code ApplyConfigVerifyPhaseTest:2647} carries
+     * {@code "version": "11.5.2"} inside a FIXTURE block, and no syntactic property separates
+     * them. Neither value is in this population, and the witness line is printed in the failure
+     * rather than merely counted so that a reader can see which kind it is.
+     */
+    private static List<TestLine> liveTestLines(List<Path> tests) throws IOException {
+        var out = new ArrayList<TestLine>();
+        for (Path test : tests) {
+            var lines = Files.readAllLines(test, StandardCharsets.UTF_8);
+            for (int i = 0; i < lines.size(); i++) {
+                var trimmed = lines.get(i).strip();
+                if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) {
+                    continue;
+                }
+                out.add(new TestLine(posixRelative(test) + ":" + (i + 1), lines.get(i)));
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The first live test line that names the pin variable and this exact value, or {@code null}.
+     *
+     * <p>The value is matched as a whole token: {@code 0.18} must not be answered by
+     * {@code 0.18.0}, and {@code 6.3} must not be answered by the inside of {@code v0.16.3} —
+     * which is how a containment test over version-shaped strings reads as coverage. The variable
+     * must be on the same line, so a value that merely occurs somewhere in a test is not a witness.
+     */
+    private static String liveWitness(Set<String> variables, String value, List<TestLine> lines) {
+        var exact = Pattern.compile("(?<![\\w.\\-])" + Pattern.quote(value) + "(?![\\w.\\-])");
+        for (TestLine line : lines) {
+            for (String variable : variables) {
+                if (line.content().contains(variable) && exact.matcher(line.content()).find()) {
+                    return line.ref();
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Forward slashes, relative to the module root: the spelling the declaration is keyed on. */
+    private static String posixRelative(Path p) {
+        return p.toString().replace('\\', '/');
     }
 
     // --- harness ---------------------------------------------------------------------
