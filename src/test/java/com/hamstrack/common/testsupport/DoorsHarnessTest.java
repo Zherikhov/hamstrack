@@ -345,6 +345,34 @@ class DoorsHarnessTest {
                 .isLessThanOrEqualTo(25);
     }
 
+    /**
+     * <strong>And a floor over a different subject refuses in the caller's own words</strong>
+     * (HD-340). The standard three causes are about a {@code Doors} population — "a door really
+     * left", "fix Doors, never the floor" — and a seal over a marker annotation, a build file or a
+     * set of call sites would otherwise print a remedy its reader cannot perform, which is the
+     * HD-301 defect in a new place. Asserted in both directions: the caller's cause appears, and
+     * the inherited one does not.
+     */
+    @Test
+    void floorOverADifferentSubjectCarriesTheCallersOwnCauses() {
+        var probe = Population.of("marked members", List.of("a", "b"));
+        var why = "Every arm asserts \"nothing offends\", so a population that lost a member "
+                  + "reports clean for ever.";
+        var causes = List.of("target/classes is stale (`mvnw clean compile`);",
+                "a member really lost its marker — lower the floor in the SAME commit.");
+
+        assertThatThrownBy(() -> probe.floor(3, why, causes))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("marked members: the scan saw 2, under the floor of 3.")
+                .hasMessageContaining("a member really lost its marker")
+                .hasMessageNotContaining("fix Doors")
+                .hasMessageContaining("Do not lower a floor to make a run pass.");
+
+        assertThat(probe.floor(2, why, causes).describe())
+                .as("a met floor is recorded for describe() exactly as the standard overload does")
+                .isEqualTo("marked members: 2 (floor 2)");
+    }
+
     @Test
     void filterRemembersTheParentCount() {
         var narrowed = Population.of("letters", List.of("a", "b", "c")).filter("vowels only", "aeiou"::contains);

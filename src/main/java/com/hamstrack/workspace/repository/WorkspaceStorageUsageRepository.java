@@ -1,5 +1,6 @@
 package com.hamstrack.workspace.repository;
 
+import com.hamstrack.common.security.CalledOnlyFrom;
 import com.hamstrack.workspace.entity.WorkspaceStorageUsage;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -22,10 +23,13 @@ import java.util.UUID;
  *
  * <p>Everything below is workspace-keyed. There is deliberately no unscoped finder: this table
  * has one row per tenant and no other predicate has a legitimate caller, so the shape that
- * causes this project's top bug class cannot be written by accident. The two aggregates that
- * are NOT workspace-keyed ({@link #totalBytesUsed()} and {@link #maxFillAgainst}) exist for the
+ * causes this project's top bug class cannot be written by accident. The aggregates that are
+ * NOT workspace-keyed ({@link #totalBytesUsed()} and {@link #maxFillAgainst}) exist for the
  * operator metrics and return a single install-wide number carrying no tenant identity —
- * the same division {@code ProductMetrics} applies to the mail gauges.
+ * the same division {@code ProductMetrics} applies to the mail gauges. Each of them declares
+ * its caller, and {@code CalledOnlyFromSealTest} holds that declaration against the call graph
+ * (HD-340): "exists for the operator metrics" is a sentence, and a tenant-facing caller would
+ * answer one workspace with a number about all of them.
  */
 public interface WorkspaceStorageUsageRepository extends Repository<WorkspaceStorageUsage, UUID> {
 
@@ -100,6 +104,20 @@ public interface WorkspaceStorageUsageRepository extends Repository<WorkspaceSto
      * {@code hamstrack.storage.bytes_used_total} — one row per workspace, so a cheap scrape.
      * Install-wide and tenant-anonymous, per the cardinality rule.
      */
+    @CalledOnlyFrom(
+            callers = "com.hamstrack.common.observability.ProductMetrics",
+            requestScopedCallers = "com.hamstrack.common.observability.ProductMetrics",
+            because = "it sums across every tenant; the number carries no tenant identity, which "
+                      + "is what makes it an operator gauge rather than a disclosure, and an "
+                      + "answer on a tenant's own path would tell that tenant about the others. "
+                      + "ProductMetrics is exempted by name because web beans do dispatch to it — "
+                      + "they increment counters — while the reference to THIS method is handed "
+                      + "to Gauge.builder in its constructor as a supplier: registered once, then "
+                      + "executed by the metrics scrape for as long as the process lives. The "
+                      + "scrape is operator-facing and answers no tenant, which is the property; "
+                      + "the seal holds the construction-time half of it",
+            instead = "read findByWorkspaceId(workspaceId) — every other method here is "
+                      + "workspace-keyed, which is the property this interface was built on")
     @Query("SELECT COALESCE(SUM(u.bytesUsed), 0) FROM WorkspaceStorageUsage u")
     long totalBytesUsed();
 
@@ -112,6 +130,12 @@ public interface WorkspaceStorageUsageRepository extends Repository<WorkspaceSto
      * property, not a column — there is no per-workspace quota and this ticket deliberately
      * does not create one.
      */
+    @CalledOnlyFrom(
+            callers = "com.hamstrack.workspace.service.WorkspaceStorageReconciler",
+            because = "it reports the fullest workspace on the instance; the fraction names no "
+                      + "tenant, and a tenant-facing caller would be publishing another "
+                      + "workspace's fill level under its own gauge",
+            instead = "read findByWorkspaceId(workspaceId) and compute the fill for THAT workspace")
     @Query("SELECT COALESCE(MAX(u.bytesUsed), 0) * 1.0 / :quotaBytes FROM WorkspaceStorageUsage u")
     double maxFillAgainst(@Param("quotaBytes") long quotaBytes);
 

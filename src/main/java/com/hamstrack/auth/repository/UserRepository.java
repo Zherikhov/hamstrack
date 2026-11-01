@@ -2,6 +2,7 @@ package com.hamstrack.auth.repository;
 
 import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.security.CalledOnlyFrom;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -41,9 +42,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     /**
      * Exact-match existence — a <strong>read-side</strong> question, and deliberately not a
-     * write-side one. No production caller: {@code AuthService.register} and
-     * {@code AdminUserService.create} both ask {@link #existsByFoldedEmail}, which asks the
-     * question in the expression {@code users_email_lower_uk} answers it in.
+     * write-side one. No production caller: the writers ask {@link #existsByFoldedEmail} instead,
+     * which asks the question in the expression {@code users_email_lower_uk} answers it in. That
+     * absence is held by {@code UserEmailFinderSealTest}, which scans the production tree for the
+     * call rather than leaving the sentence to be re-read.
      *
      * <p>Kept because tests assert on it, where an exact check is the correct one ("is this the
      * row we wrote?"). <strong>Do not reach for it from a writer</strong> — it sits one line above
@@ -108,7 +110,21 @@ public interface UserRepository extends JpaRepository<User, UUID> {
      * completion before the application serves traffic, so by the time this can be called the
      * invariant already holds. Any caller that resolves an identity uses {@link #findByEmail}
      * instead — see the rule on this interface.
+     *
+     * <p><strong>"Seeding only" is declared below, and {@code CalledOnlyFromSealTest} holds the
+     * declaration against the call graph</strong> (HD-340). It was prose until
+     * then, which is the weakest possible holder for it: the method that mints a system
+     * administrator is one autocomplete away from any authentication path, and the caller-side
+     * discipline this javadoc describes — compare the address exactly, refuse the boot otherwise —
+     * exists in exactly one place and travels with no caller.
      */
+    @CalledOnlyFrom(
+            callers = "com.hamstrack.common.seed.DataSeeder",
+            because = "a miss here MINTS an ACTIVE system administrator, so a second caller is a "
+                      + "second place that decides who is an admin, and the exact-address check "
+                      + "that makes the fold safe lives at the one call site rather than here",
+            instead = "resolve an identity through findByEmail, which compares exactly; nothing "
+                      + "outside the seeder has a question this method answers")
     @Query("select u from User u where lower(u.email) = lower(:email)")
     Optional<User> findByFoldedEmail(@Param("email") String email);
 

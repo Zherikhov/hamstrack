@@ -1,5 +1,6 @@
 package com.hamstrack.workspace.repository;
 
+import com.hamstrack.common.security.CalledOnlyFrom;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.workspace.entity.Role;
@@ -42,7 +43,18 @@ public interface RoleRepository extends Repository<Role, UUID> {
      * One statement, permissions initialised — the only load behind
      * {@code RolePermissionCache}. {@code LEFT JOIN} because a role granting nothing is
      * legal and expected (the built-in Viewer is exactly that, §11.4).
+     *
+     * <p>"Only" is a declaration since HD-340, not a description: the caller is named in the
+     * {@code @CalledOnlyFrom} below and {@code CalledOnlyFromSealTest} derives the real ones
+     * from bytecode. It takes a bare id with no scope, so a caller that has not already proved
+     * the id reachable resolves a role from another tenant.
      */
+    @CalledOnlyFrom(
+            callers = "com.hamstrack.workspace.service.RolePermissionCache",
+            because = "it resolves a bare role id with no workspace predicate, so a caller that "
+                      + "has not already proved the id reachable loads another tenant's role",
+            instead = "resolve request-supplied ids through findAssignable(id, workspaceId, scope), "
+                      + "then pass THAT role's id")
     @Query("SELECT r FROM Role r LEFT JOIN FETCH r.permissions WHERE r.id = :id")
     Optional<Role> findByIdWithPermissions(@Param("id") UUID id);
 
@@ -53,7 +65,19 @@ public interface RoleRepository extends Repository<Role, UUID> {
      * grep. Legitimate uses take a compile-time built-in constant
      * ({@code BuiltInRoles}); anything resolving a role from request input must go
      * through {@link #findAssignable} first and pass <em>that</em> role's id.
+     *
+     * <p>"Visible in one grep" was the whole guarantee until HD-340, and it was never run: the
+     * caller set is declared below and {@code CalledOnlyFromSealTest} derives the real one from
+     * bytecode. (The sentence above is also a worked example of why that seal reads comment
+     * <em>blocks</em> and not lines — "visible in one" and "grep" sit on different lines, so a
+     * line-at-a-time grep for the phrase finds nothing.)
      */
+    @CalledOnlyFrom(
+            callers = "com.hamstrack.workspace.service.RoleCatalog",
+            because = "it mints a managed reference from a bare id with no scope check, and that "
+                      + "reference is written straight into a membership row as a foreign key",
+            instead = "take the reference from RoleCatalog, which only ever passes a compile-time "
+                      + "BuiltInRoles constant; for a request-supplied id use findAssignable first")
     Role getReferenceById(UUID id);
 
     /**

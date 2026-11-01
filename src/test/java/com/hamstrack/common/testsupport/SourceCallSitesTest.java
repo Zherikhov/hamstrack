@@ -501,6 +501,49 @@ class SourceCallSitesTest {
     }
 
     /**
+     * <strong>{@link SourceCallSites#commentBlocks} in both directions</strong> — the forms it must
+     * see and the forms it must not — because a shared derivation trades a loud failure (two
+     * parsers disagreeing reds one of them) for a silent one (one parser blind everywhere), and
+     * this one is read by a seal whose whole question is "does this prose name its seal?".
+     *
+     * <p>The first case is the one the primitive exists for: the live claim it was written against
+     * has "Nothing request-scoped may" ending one line and "call it" opening the next, so a
+     * line-at-a-time scan finds neither half and reports clean.
+     */
+    @Test
+    void aCommentBlockJoinsItsLinesAndStopsWhereTheCodeStarts() {
+        var unit = new SourceCallSites.CompilationUnit(Path.of("Planted.java"), "Planted", List.of(
+                "    /**",
+                "     * Nothing request-scoped may",
+                "     * call it.",
+                "     */",
+                "    List<FieldDef> findAllLiveByKeyIn(Collection<String> keys);",
+                "",
+                "    // a line-comment run",
+                "    // is one block too",
+                "    void second() {",
+                "        live(); // a trailing comment does not open one",
+                "    }",
+                "    /** A one-liner is a block, though isCode calls its opener code. */",
+                "    void third() {"));
+
+        var blocks = SourceCallSites.commentBlocks(unit);
+
+        assertThat(blocks.stream().map(SourceCallSites.CommentBlock::text))
+                .containsExactly("Nothing request-scoped may call it.",
+                        "a line-comment run is one block too",
+                        "A one-liner is a block, though isCode calls its opener code.");
+        assertThat(blocks.stream().map(SourceCallSites.CommentBlock::startLine))
+                .as("each block reports the line it OPENS on, so a consumer can print file:line")
+                .containsExactly(1, 7, 12);
+        assertThat(blocks.stream().map(SourceCallSites.CommentBlock::text))
+                .as("the declaration between two blocks is code and ends the first; the trailing "
+                    + "comment begins in code and opens nothing")
+                .noneMatch(text -> text.contains("findAllLiveByKeyIn")
+                                   || text.contains("does not open one"));
+    }
+
+    /**
      * And a root that does not exist <strong>throws</strong>. Every consumer of this walk asserts
      * "nothing offends", so a walk that quietly found no files is the greenest possible answer to a
      * seal that has stopped working — the one failure mode a scan must never have.

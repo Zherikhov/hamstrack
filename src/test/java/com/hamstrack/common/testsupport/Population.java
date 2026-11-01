@@ -81,9 +81,32 @@ public final class Population<T> implements Iterable<T> {
      *         {@code assert} (HD-295)
      */
     public Population<T> floor(int n) {
-        var floored = new Population<>(name, members, n, parentSize, why);
+        return floor(n, POPULATION_WHY, POPULATION_CAUSES);
+    }
+
+    /**
+     * {@link #floor(int)} over the caller's own reason and remedies — for a population that is not
+     * a {@link Doors} one, where the standard three causes name actions its reader cannot perform
+     * ("a door really left", "fix Doors, never the floor"). The frame is still shared, so every
+     * floor in this repository refuses in one voice; only the remedies are the caller's.
+     *
+     * <p>Public because the reason this overload exists is a reader in another package: a seal over
+     * a marker annotation, over a build file, over a set of call sites. {@code SuiteCoverage} was
+     * the first such reader and reaches {@link #floorMessage} directly, being a neighbour; a
+     * consumer outside {@code common.testsupport} had no door at all and would otherwise have
+     * inherited the {@code Doors} remedies or hand-rolled the message (HD-340).
+     *
+     * @param why    one sentence on what the population being short makes vacuous
+     * @param causes the exhaustive alternatives, each an action its reader can take; about ten of
+     *               them fit inside the 25-line budget
+     * @throws AssertionError when {@code size() < n} — thrown explicitly, never via a bare
+     *         {@code assert} (HD-295)
+     */
+    public Population<T> floor(int n, String why, List<String> causes) {
+        var floored = new Population<>(name, members, n, parentSize, this.why);
         if (members.size() < n) {
-            throw new AssertionError(floorMessage(name, members.size(), n, floored.describe()));
+            throw new AssertionError(
+                    floorMessage(name, members.size(), n, floored.describe(), why, causes));
         }
         return floored;
     }

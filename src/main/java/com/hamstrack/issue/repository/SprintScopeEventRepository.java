@@ -1,5 +1,6 @@
 package com.hamstrack.issue.repository;
 
+import com.hamstrack.common.security.CalledOnlyFrom;
 import com.hamstrack.issue.entity.SprintScopeEvent;
 import org.springframework.data.repository.Repository;
 
@@ -10,8 +11,13 @@ import java.util.List;
  *
  * <p><strong>Write side only, and only one writer.</strong> The single caller is
  * {@code SprintScopeLedger}; no service, and certainly no controller, may insert here
- * directly. The read side (the burn-up's scope line, the sprint-review lists, the
- * velocity "committed" figure) lands with R4 in {@code com.hamstrack.report}, where
+ * directly. That is declared rather than described since HD-340 — the
+ * {@code @CalledOnlyFrom} below names the admissible caller and
+ * {@code CalledOnlyFromSealTest} derives the real ones from production bytecode — because a
+ * row written past the ledger carries whatever tenant and whatever snapshot its writer
+ * happened to set, and a ledger the reports cannot trust has no symptom at all: it is a
+ * number. The read side (the burn-up's scope line, the sprint-review lists, the velocity
+ * "committed" figure) lands with R4 in {@code com.hamstrack.report}, where
  * {@code ReportQueryScopeTest} holds every native statement to its tenant predicate.
  *
  * <p><strong>Deliberately NOT a {@code JpaRepository}</strong> — the
@@ -34,6 +40,13 @@ import java.util.List;
  * next reader here is written when it has a caller, and {@code ReportQueryScopeTest} adopts
  * this type so that it is guarded on the day it is written.
  */
+@CalledOnlyFrom(
+        callers = "com.hamstrack.issue.service.SprintScopeLedger",
+        because = "a row inserted past the ledger carries whatever workspace_id and whatever issue "
+                  + "snapshot its writer set, and a scope ledger that disagrees with reality is a "
+                  + "chart nobody can see is wrong",
+        instead = "call SprintScopeLedger, which stamps the tenant and the snapshot and whose "
+                  + "mutation doors SprintScopeLedgerDoorsTest holds")
 public interface SprintScopeEventRepository extends Repository<SprintScopeEvent, java.util.UUID> {
 
     /**

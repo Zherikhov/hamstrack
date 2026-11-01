@@ -26,7 +26,9 @@ import java.time.OffsetDateTime;
  * deleting the ISSUE only nulls {@link #issue} — see there for why the two differ.
  *
  * <p><strong>One writer.</strong> Every row is written by {@code SprintScopeLedger} and
- * by nothing else. Sprint membership changes in seven places today (see that class's
+ * by nothing else — declared on {@code SprintScopeEventRepository} and held by
+ * {@code CalledOnlyFromSealTest} since HD-340, rather than restated and re-read.
+ * Sprint membership changes in seven places today (see that class's
  * javadoc for the enumerated list); a door that mutates {@code issues.sprint_id} without
  * going through the ledger makes the burn-up's scope line silently wrong, which is the
  * exact failure mode that makes competitors' sprint charts distrusted.

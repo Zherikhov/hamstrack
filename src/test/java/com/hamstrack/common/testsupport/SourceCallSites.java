@@ -192,6 +192,82 @@ public final class SourceCallSites {
     }
 
     /**
+     * One contiguous run of comment lines, joined into a single string of prose.
+     *
+     * @param startLine the 1-based source line the run opens on, so a consumer can report
+     *                  {@code file:line}
+     * @param text      the comment markers stripped, the lines joined with one space and every
+     *                  whitespace run collapsed — so a sentence a line break split in two
+     *                  ("Nothing request-scoped may" / "call it") is one phrase again, which is the
+     *                  whole reason a block and not a line is the unit here
+     */
+    public record CommentBlock(Path path, String type, int startLine, String text) {
+
+        /** {@code src/main/java/com/hamstrack/Foo.java:28}, with forward slashes on any OS. */
+        public String site() {
+            return path.toString().replace('\\', '/') + ":" + startLine;
+        }
+    }
+
+    /**
+     * <strong>Every comment block of one unit</strong> — the walk for a seal that reads the prose
+     * rather than the code, which is the direction the rest of this class does not serve: a claim
+     * about who may call a member is written in a javadoc, and a scan that only ever skipped
+     * comments could never find one.
+     *
+     * <p><strong>It reuses {@link #isCode} and adds exactly one case to it.</strong> That predicate
+     * answers "is this line's occurrence a call?", for which a block OPENER is code — so
+     * {@code /** Nothing may call this. *}{@code /} on one line reads as code there. A block
+     * scanner must take it, so {@code /*} opens a block here, and {@code isCode} is left alone
+     * rather than widened under its own consumers.
+     *
+     * <p><strong>What it over-reports, both in the same direction.</strong> A line that <em>begins</em>
+     * with a block comment and continues into code ({@code /* note *}{@code / live();}) is read as
+     * prose, and so is a text-block line that happens to start with {@code *}. Both add a block that
+     * is not one; neither can remove a block that is. A consumer whose question is "does this prose
+     * name its seal?" gets a spurious subject at worst — it never loses a real one, which is the
+     * direction that matters for a seal.
+     *
+     * <p><strong>What it does not see:</strong> a trailing comment ({@code live(); // note}), which
+     * does not open a block, because the line begins in code. Measured on landing day: all five
+     * caller-set claims in {@code src/main/java} are leading comment runs, and a claim nobody wrote
+     * in a javadoc is not the shape this is for.
+     */
+    public static List<CommentBlock> commentBlocks(CompilationUnit unit) {
+        var out = new ArrayList<CommentBlock>();
+        var text = new StringBuilder();
+        var start = 0;
+        var lines = unit.lines();
+        for (int i = 0; i <= lines.size(); i++) {
+            var trimmed = i < lines.size() ? lines.get(i).trim() : "";
+            if (i < lines.size() && (!isCode(trimmed) || trimmed.startsWith("/*"))) {
+                if (text.isEmpty()) {
+                    start = i + 1;
+                }
+                text.append(' ').append(withoutCommentMarkers(trimmed));
+            } else if (!text.isEmpty()) {
+                out.add(new CommentBlock(unit.path(), unit.type(), start,
+                        text.toString().replaceAll("\\s+", " ").strip()));
+                text.setLength(0);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * The one line with its opening {@code /**}, {@code *}, {@code //} and closing
+     * {@code *}{@code /} removed — <strong>the closing marker first</strong>. The other order
+     * fails on the commonest line in a javadoc, the bare terminator: the leading-marker pattern
+     * eats its {@code *} and leaves a stray {@code /} glued to the end of the block's text. Found
+     * by the table-driven arm in {@code SourceCallSitesTest}, not by review.
+     */
+    private static String withoutCommentMarkers(String trimmedLine) {
+        var stripped = trimmedLine.endsWith("*/")
+                ? trimmedLine.substring(0, trimmedLine.length() - "*/".length()) : trimmedLine;
+        return stripped.replaceFirst("^(/\\*+|//+|\\*+)", "");
+    }
+
+    /**
      * <strong>Is the occurrence at {@code at} inside a comment?</strong> — judged on this line
      * alone, by what precedes the occurrence rather than by what the line starts with (HD-326).
      *

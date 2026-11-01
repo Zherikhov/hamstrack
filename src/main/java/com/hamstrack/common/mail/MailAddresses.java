@@ -274,8 +274,10 @@ public final class MailAddresses {
      * The same key with no witness for a truncation — for tests and for any caller that only compares
      * or measures a key. Production goes through
      * {@link #throttleKey(String, java.util.function.IntConsumer)}; nothing in {@code src/main} may
-     * call this overload, and a test holds that (a silent degradation is the shape behind five of this
-     * project's CRIT defects).
+     * call this overload, and {@code MailAddressesThrottleKeyTest} holds that — matching on the
+     * parameter count, which is what separates the two overloads and what the bytecode walk behind
+     * {@code CalledOnlyFrom} deliberately cannot do (a silent degradation is the shape behind five
+     * of this project's CRIT defects).
      */
     public static String throttleKey(String email) {
         return throttleKey(email, null);

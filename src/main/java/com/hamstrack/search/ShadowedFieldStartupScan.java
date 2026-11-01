@@ -51,6 +51,9 @@ import java.util.regex.Pattern;
  * makes it safe: it is a process on the operator's own instance, not a request, and it emits ids,
  * keys, names and scope ids — never issue data and never field values. No request-scoped surface
  * shares this query; {@code /schema} builds its list from the caller's own {@code ResolutionContext}.
+ * Since HD-340 that is a declaration on the query itself ({@code @CalledOnlyFrom}) which
+ * {@code CalledOnlyFromSealTest} checks against the real call graph, so this class losing its
+ * exclusivity is a red build and not a stale paragraph.
  *
  * <p>Every line carries the stable {@code shadowed-field-def:} prefix so log-based alerting (Loki,
  * in Cloud) can key on it without parsing prose — which is also why every value a <em>row</em>
@@ -67,9 +70,51 @@ public class ShadowedFieldStartupScan {
     private final FieldRegistry registry;
     private final FieldDefRepository fieldDefRepository;
 
+    /**
+     * <strong>Package-private, and that narrows the containment on
+     * {@code FieldDefRepository.findAllLiveByKeyIn} rather than completing it</strong> (HD-340).
+     * Spring invokes this; nothing outside {@code com.hamstrack.search} can — the
+     * {@code DefaultRoleResponse.of} precedent, where an access modifier is the guard and javac is
+     * what enforces it.
+     *
+     * <p><strong>Be exact about what that buys, because the obvious next sentence is false.</strong>
+     * It does not close the two-hop route; it moves it. A two-hop route into this class can now
+     * only be written from inside {@code com.hamstrack.search} — which is 21 classes and is
+     * precisely the request-path package: it holds {@code SearchController} (a
+     * {@code @RestController}) and {@code SearchService} beside this one. A controller calling
+     * {@code scan()} directly is refused, because that makes this class a direct target of a web
+     * bean and {@code CalledOnlyFromSealTest}'s arm (2) sees it. A controller reaching it through
+     * {@code SearchService} is <strong>not</strong> refused — that is the residual arm (2) does
+     * not cover, stated here as well as on {@code FieldDefRepository} so this file is not the one
+     * place claiming it is gone. What the change does buy is real: the set of classes that could
+     * ever be that intermediary drops from the whole tree to the 20 beside this one, and the bound
+     * is the compiler rather than a test. Nothing is live — MEASURED 2026-10-24,
+     * {@code grep -rn "\.scan()" src/main/java} returns no match.
+     *
+     * <p><strong>Two framework facts here are measured, not remembered</strong> (2026-10-24, Boot
+     * 4.1 / Spring 7): a package-private {@code @EventListener} IS invoked, and
+     * {@code @Transactional} on it IS honoured — which is the opposite of the long-standing
+     * documented guidance that proxy-mode transactions apply to public methods only, and is why it
+     * was probed rather than assumed.
+     *
+     * <p><strong>How the second one was separated from its look-alike</strong>, because
+     * {@code isActualTransactionActive()} alone cannot do it — it answers {@code true} for ANY
+     * live transaction, including one opened further out, so "advised here" and "ran inside
+     * somebody else's transaction" produce the same reading. Three listeners on one bean, one
+     * publish, no ambient transaction ({@code false} before publishing): the package-private
+     * {@code @Transactional} one reported a transaction <em>named after itself</em>
+     * ({@code …$Probe.onPackagePrivate}), the public one the same, and the control — the same
+     * bean, same event, <em>no</em> {@code @Transactional} — reported {@code active=false},
+     * {@code name=null}. A name is what makes the reading a fact about this method rather than
+     * about its surroundings.
+     *
+     * <p>Both facts are load-bearing: if a future version stops registering non-public listeners,
+     * this scan silently never runs and its only output is log lines nobody misses.
+     * {@code ShadowedFieldStartupScanTest} holds the registration for that reason.
+     */
     @EventListener(ApplicationReadyEvent.class)
     @Transactional(readOnly = true)
-    public void scan() {
+    void scan() {
         List<FieldDef> shadowed;
         try {
             shadowed = fieldDefRepository.findAllLiveByKeyIn(registry.claimedKeys());

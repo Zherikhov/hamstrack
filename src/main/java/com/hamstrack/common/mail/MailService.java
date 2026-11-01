@@ -102,7 +102,11 @@ public class MailService {
     /**
      * <strong>What keeps an SMTP round trip out of a cross-tenant lock is the ordering, not the
      * hand-off</strong> (HD-181, correcting what this javadoc once claimed). The only caller is
-     * {@code WorkspaceService.inviteMember}, which takes
+     * {@code WorkspaceService.inviteMember} today, and the sentence that matters is not that count
+     * but the ordering it illustrates — which is held as a <em>category</em> by
+     * {@code MailerAfterCommitCoverageTest}, reflectively, over every public {@code send*} method
+     * this class declares. A second caller is therefore not a defect to be refused: it is covered
+     * the moment it compiles, provided it registers the send the same way. It takes
      * {@code pg_advisory_xact_lock(hashtext(recipient_key))} in {@code RecipientMailThrottle} and
      * holds it until commit; a recipient address is something two tenants legitimately share, so a
      * send performed inside that section is a wait one tenant can impose on another simply by

@@ -20,6 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 
@@ -54,7 +55,68 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 class ShadowedFieldStartupScanTest {
 
     @Autowired ShadowedFieldStartupScan scan;
+    @Autowired org.springframework.context.ApplicationContext applicationContext;
     @Autowired FieldRegistry registry;
+
+    /**
+     * <strong>The boot still reaches {@code scan()} now that it is package-private</strong>
+     * (HD-340 R4).
+     *
+     * <p>Every other test here calls {@code scan.scan()} directly — correct for asking what the
+     * scan does, and blind to whether Spring still <em>calls</em> it. That blindness is the whole
+     * risk of the visibility change: the method's only output is log lines, so a release in which
+     * Spring stopped registering non-public {@code @EventListener}s would take this feature away
+     * in total silence while every assertion in this file stayed green.
+     *
+     * <p>Measured rather than remembered (2026-10-24, Boot 4.1 / Spring 7): a package-private
+     * listener is registered and invoked, and {@code @Transactional} on it is honoured — the
+     * latter contradicting Spring's documented proxy-mode rule that only public methods are
+     * advised. So the registration is asserted against the live multicaster rather than trusted.
+     * Asked of the registry and not by publishing the event, because {@code ApplicationReadyEvent}
+     * has other listeners in this context and firing it for a question about one of them would
+     * buy side effects nobody asked for.
+     */
+    @Test
+    void springStillRegistersThePackagePrivateReadyListener() {
+        var multicaster = applicationContext.getBean(
+                org.springframework.context.event.ApplicationEventMulticaster.class);
+        // getApplicationListeners() is protected on AbstractApplicationEventMulticaster and there
+        // is no public way to ask. If a future Spring renames it this throws rather than passing,
+        // which is the right direction: the question "is scan() still invoked" then needs asking
+        // some other way, not skipping.
+        Collection<?> listeners = org.springframework.test.util.ReflectionTestUtils
+                .invokeMethod(multicaster, "getApplicationListeners");
+        // Keyed on the METHOD, not the class. Today this class has exactly one @EventListener, so
+        // "a listener mentioning ShadowedFieldStartupScan" and "a listener for scan()" coincide —
+        // and the day a second one arrives, a class-keyed filter would stay green with
+        // @EventListener removed from scan() alone. ProductionBytecode's own javadoc states that
+        // trap: a class is the unit only when the class has one such place, which is a fact
+        // nobody re-checks. MEASURED 2026-10-24: the adapter renders as
+        // "void com.hamstrack.search.ShadowedFieldStartupScan.scan()".
+        var registered = java.util.Objects.requireNonNull(listeners).stream()
+                .map(Object::toString)
+                .filter(name -> name.contains("ShadowedFieldStartupScan") && name.contains("scan("))
+                .toList();
+
+        assertThat(registered)
+                .withFailMessage("""
+
+                        Spring has no listener registered for ShadowedFieldStartupScan.
+
+                        scan() is package-private on purpose — it is half of the containment on \
+                        FieldDefRepository.findAllLiveByKeyIn, which answers across every tenant \
+                        (see CalledOnlyFromSealTest). That only works while Spring keeps invoking \
+                        non-public @EventListener methods. If this is red after a Spring upgrade, \
+                        the shadowed-key report has stopped running on every instance and nothing \
+                        else would have told you: its entire output is log lines.
+
+                        Make scan() public again and re-run — if that fixes it, the framework \
+                        behaviour changed, and the containment needs the seal's arms alone, with \
+                        the sentence on FieldDefRepository weakened to match.
+
+                        Registered listeners mentioning this class: %s""", registered)
+                .hasSize(1);
+    }
     @Autowired FieldDefRepository fieldDefRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired UserRepository userRepository;
