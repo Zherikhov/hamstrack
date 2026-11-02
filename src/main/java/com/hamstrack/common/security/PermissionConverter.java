@@ -38,8 +38,9 @@ import org.slf4j.LoggerFactory;
  *       role until the rename's migration runs.</li>
  * </ul>
  *
- * <p>So the loud-but-degraded option strictly dominates, and the ERROR log (with the key
- * and the row's role) is what makes it non-silent — the §18 risk is silence, not
+ * <p>So the loud-but-degraded option strictly dominates, and the ERROR log (which names
+ * the key, and only the key — the converter is handed a column value and never sees the
+ * row it came from) is what makes it non-silent — the §18 risk is silence, not
  * narrowing. {@code RoleView.of} filters the resulting nulls before they reach
  * {@code PermissionSet.of}.
  *

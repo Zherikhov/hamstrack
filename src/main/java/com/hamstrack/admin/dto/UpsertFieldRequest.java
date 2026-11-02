@@ -27,13 +27,32 @@ import jakarta.validation.constraints.Size;
  * for numbers.
  *
  * <p><strong>{@code name} is {@link DisplayText#SINGLE_LINE} because it is now logged.</strong>
- * The key is pattern-bounded to {@code [a-z0-9_]} and always was; the display name was bounded
- * only in length, and {@code ShadowedFieldStartupScan} prints it under the stable
- * {@code shadowed-field-def:} prefix that the operator documentation tells people to alert on.
- * A taxonomy admin owning a live shadowed field could otherwise put a line terminator in the
- * display name and forge a second line under that prefix at every boot — the ordinary
- * log-forging shape, one annotation to close, and the same annotation every other display name
- * in this codebase already carries. {@code description} takes {@link DisplayText#MULTI_LINE}
+ * The key is pattern-bounded to {@code [a-z0-9_]} <em>here</em>, and always was; the display name
+ * was bounded only in length, and {@code ShadowedFieldStartupScan} reports it under the published
+ * {@code shadowed-field-def:} prefix (the contract is in {@code docs/observability.md}; no shipped
+ * alert rule keys on it today). A taxonomy admin owning a live shadowed field could otherwise put
+ * a line terminator in the display name and forge a second line under that prefix at every boot —
+ * the ordinary log-forging shape, one annotation to close, and the same annotation every other
+ * display name in this codebase already carries.
+ *
+ * <p><strong>What that annotation does NOT bound is the forgery HD-341 is actually about.</strong>
+ * {@link DisplayText#SINGLE_LINE} excludes control, line-separating, bidi and zero-width characters
+ * and nothing else: MEASURED 2026-11-02 against the compiled pattern, {@code '}, {@code "},
+ * {@code (}, {@code )}, {@code =}, digits and letters all match. So a holder of
+ * {@code WORKSPACE_TAXONOMY_MANAGE} editing the display name of a field that is <em>already</em>
+ * shadowed — an ordinary supported {@code PATCH …/fields/&#123;id&#125;}, at any scope, in their own
+ * workspace — could put the record's own delimiters into the name and re-point it at another
+ * tenant, and still fit the 100-character bound (a 77-character name sufficed, MEASURED). They
+ * cannot <em>create</em> such a row, because {@code createField} answers 409 on a registry-claimed
+ * key; they need one an upgrade past 0.18.0 left behind, which is the entire reason the startup
+ * scan exists. The undoored routes below are therefore <em>additional</em> reach, not the only
+ * reach.
+ *
+ * <p>Both bounds here are <strong>door</strong> bounds and neither column carries a CHECK
+ * constraint, so they are half of the guard and not the whole of it: the rows that forced the
+ * shadowed-key work arrived by a migration, a seeder and direct SQL, which meet no DTO. The other
+ * half is at the sink — {@code LogValues.oneLine} plus carrying the value in a key-value member
+ * rather than in the message (HD-341). {@code description} takes {@link DisplayText#MULTI_LINE}
  * instead: the console renders it as a textarea, and the single-line class rejects the newline,
  * so applying {@code name}'s pattern to prose answers 400 to an Enter keypress — the shipped bug
  * that split those two constants apart.

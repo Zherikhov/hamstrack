@@ -1245,15 +1245,26 @@ traffic rather than that anything is broken.
 **What you will see.** From 0.18.0 your instance names, once per boot, every custom field
 definition whose key a built-in search name has taken:
 
-```
-WARN  shadowed-field-def: custom field 'Team labels' (key 'labels', id 0192…, scope workspace 0192…)
-      is shadowed by the built-in search field 'label'. HQL `labels = …` answers from the built-in
-      field, not from this one, and it is not offered in /search/schema. A taxonomy admin at that
-      scope can rename its key (PATCH …/fields/0192…); see
-      docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.
+```json
+{
+  "level": "WARN",
+  "message": "shadowed-field-def: a live custom field definition is shadowed by the built-in search field label — field id 0192…, scope workspace 0192…; its key and display name are in this record's field.key and field.name. HQL `labels = …` answers from the built-in field, not from this one, and it is not offered in /search/schema. A taxonomy admin at that scope can rename its key (PATCH …/fields/0192…); see docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.",
+  "field.id": "0192…",
+  "field.scope": "workspace 0192…",
+  "field.key": "labels",
+  "field.name": "Team labels",
+  "field.builtin": "label"
+}
 ```
 
-plus one summary line. **A healthy instance prints nothing here** — the three archived
+plus one summary line. (Abridged — the real object also carries `@timestamp`,
+`logger_name` and the rest of the schema in
+[§ Logging](observability.md#logging).) **Your field's key and display name are
+in the `field.key` and `field.name` members, not in the sentence**: both are text
+a database row supplied, and a record an alert rule may key on is built only from
+values Hamstrack itself produced. On the dev console format, which prints the
+message alone, those two values are not shown — both shipped profiles (`dc` and
+`cloud`) emit the JSON above. **A healthy instance prints nothing here** — the three archived
 placeholders Hamstrack seeds itself (`labels`, `sprint`, `components`) are deliberately not
 counted. If you see no such line, there is nothing to do.
 

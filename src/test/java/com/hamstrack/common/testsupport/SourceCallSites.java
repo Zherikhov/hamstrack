@@ -735,4 +735,192 @@ public final class SourceCallSites {
             default -> false;
         };
     }
+
+    // ------------------------------------------------------- log call sites (HD-341)
+
+    /**
+     * One SLF4J call site with a literal message template, and the key-value members it attaches.
+     *
+     * @param level    {@code warn}, {@code info}, … — from {@code log.warn(} or {@code log.atWarn()}
+     * @param template the message template with every {@code +}-concatenated literal joined, so a
+     *                 template wrapped over five source lines is one string. This is the unit a
+     *                 rule about a template is about: a seal reading only the first literal would
+     *                 miss a quoted placeholder on line four, and {@code ShadowedFieldStartupScan}
+     *                 had exactly that shape
+     * @param keys     the literal first arguments of the {@code addKeyValue(} calls belonging to
+     *                 <em>this</em> fluent chain — empty for the classic {@code log.warn(fmt, …)}
+     *                 form, which cannot carry any
+     */
+    public record LogSite(Path path, String type, int line, String method, String level,
+                          String template, List<String> keys) {
+
+        /** {@code src/main/java/com/hamstrack/Foo.java:133}, with forward slashes on any OS. */
+        public String site() {
+            return path.toString().replace('\\', '/') + ":" + line;
+        }
+
+        /**
+         * The leading {@code token:} of the template, or {@code null} — <strong>only</strong> when
+         * the colon precedes the first {@code {}} placeholder, which is what distinguishes a
+         * prefix from a colon in prose ({@code "renamed {} to {}: …"} has none).
+         */
+        public String prefix() {
+            var placeholder = template.indexOf("{}");
+            var colon = template.indexOf(':');
+            if (colon < 0 || (placeholder >= 0 && placeholder < colon)) {
+                return null;
+            }
+            return template.substring(0, colon + 1);
+        }
+    }
+
+    /**
+     * <strong>Every log call site in one unit whose message template is a literal.</strong>
+     *
+     * <p>Shared rather than written again beside its consumer: it is built on
+     * {@link #statementsOf}, which already knows which characters are inside a literal and which
+     * line each came from, and a second scanner recomputing that from joined text is the drift
+     * this class exists to prevent. A comment is never a call site, for the same reason and by the
+     * same pass — {@code log.warn("x: {}")} quoted in a javadoc is prose, and several javadocs
+     * here quote the very templates a consumer is enumerating.
+     *
+     * <p><strong>Two forms are recognised</strong>, and the second is load-bearing: the classic
+     * {@code log.warn(fmt, args)} and the fluent {@code log.atWarn().addKeyValue(k, v).log(fmt,
+     * args)}. A scan that knew only the first would watch its own population shrink every time a
+     * record was moved to key-value members — the change is invisible to the floor, because the
+     * survivors still satisfy it.
+     *
+     * <p><strong>What it does not see</strong>, each in the direction that loses a member, so a
+     * consumer with a floor is the thing that notices: a template that is not a literal
+     * ({@code log.warn(message)}); a {@code .log(} in a statement that does not also contain
+     * {@code log.at} (which is how a {@code somethingElse.log(} is kept out); and
+     * <strong>a logger field that is not named {@code log}</strong> — a
+     * {@code private static final Logger LOG} would drop every record it writes while the floor
+     * stayed satisfied by the survivors, which is precisely the shape this paragraph keeps a list
+     * for. That one is not left to the list: MEASURED 2026-11-01, every logger in
+     * {@code src/main/java} is named {@code log} (45 Lombok {@code @Slf4j} classes plus one
+     * hand-rolled field in {@code PermissionConverter}), and
+     * {@code SourceCallSitesTest#everyLoggerInTheProductionTreeIsNamedLog} is what keeps that true
+     * rather than this sentence. A text block is read verbatim, incidental indentation included.
+     */
+    public static List<LogSite> logSites(CompilationUnit unit) {
+        var out = new ArrayList<LogSite>();
+        var enclosing = enclosingMethods(unit.lines());
+        for (var statement : statementsOf(unit.lines())) {
+            var text = statement.text();
+            for (var at = 0; at < text.length(); at++) {
+                if (statement.literal()[at]) {
+                    continue;
+                }
+                var opener = openerAt(statement, at);
+                if (opener == null) {
+                    continue;
+                }
+                var template = literalChainAt(statement, at + opener.length());
+                if (template == null) {
+                    continue;
+                }
+                var line = statement.lineOf(at);
+                out.add(new LogSite(unit.path(), unit.type(), line,
+                        line - 1 < enclosing.size() ? enclosing.get(line - 1) : FILE_SCOPE,
+                        levelOf(statement, at, opener), template,
+                        keyValueKeysBefore(statement, at)));
+            }
+        }
+        return out;
+    }
+
+    private static final List<String> LEVELS = List.of("trace", "debug", "info", "warn", "error");
+
+    /** The call text at {@code at} that opens a log template, or {@code null}. */
+    private static String openerAt(Statement s, int at) {
+        for (var level : LEVELS) {
+            var opener = "log." + level + "(";
+            if (s.text().startsWith(opener, at)) {
+                return opener;
+            }
+        }
+        return s.text().startsWith(".log(", at) && s.text().contains("log.at") ? ".log(" : null;
+    }
+
+    private static String levelOf(Statement s, int at, String opener) {
+        if (!opener.equals(".log(")) {
+            return opener.substring("log.".length(), opener.length() - 1);
+        }
+        var chain = s.text().lastIndexOf("log.at", at);
+        if (chain < 0) {
+            return "?";
+        }
+        var name = s.text().substring(chain + "log.at".length());
+        var end = name.indexOf('(');
+        return end < 0 ? "?" : name.substring(0, end).toLowerCase(java.util.Locale.ROOT);
+    }
+
+    /** The keys of the {@code addKeyValue(} calls between this chain's {@code log.at} and {@code at}. */
+    private static List<String> keyValueKeysBefore(Statement s, int at) {
+        var chain = s.text().lastIndexOf("log.at", at);
+        if (chain < 0) {
+            return List.of();
+        }
+        var keys = new ArrayList<String>();
+        var needle = "addKeyValue(";
+        var i = s.text().indexOf(needle, chain);
+        while (i >= 0 && i < at) {
+            var key = literalChainAt(s, i + needle.length());
+            if (key != null) {
+                keys.add(key);
+            }
+            i = s.text().indexOf(needle, i + 1);
+        }
+        return keys;
+    }
+
+    /**
+     * The {@code +}-joined string literals starting at {@code from}, unescaped and concatenated, or
+     * {@code null} when the first non-space character there is not a quote.
+     */
+    private static String literalChainAt(Statement s, int from) {
+        var text = s.text();
+        var out = new StringBuilder();
+        var i = from;
+        while (true) {
+            while (i < text.length() && text.charAt(i) == ' ') {
+                i++;
+            }
+            if (i >= text.length() || text.charAt(i) != '"') {
+                return out.isEmpty() ? null : out.toString();
+            }
+            var block = text.startsWith("\"\"\"", i);
+            var quote = block ? "\"\"\"" : "\"";
+            i += quote.length();
+            while (i < text.length() && !text.startsWith(quote, i)) {
+                if (text.charAt(i) == '\\' && i + 1 < text.length()) {
+                    out.append(unescape(text.charAt(i + 1)));
+                    i += 2;
+                } else {
+                    out.append(text.charAt(i));
+                    i++;
+                }
+            }
+            i += quote.length();
+            while (i < text.length() && text.charAt(i) == ' ') {
+                i++;
+            }
+            if (i >= text.length() || text.charAt(i) != '+') {
+                return out.toString();
+            }
+            i++;
+        }
+    }
+
+    private static String unescape(char escaped) {
+        return switch (escaped) {
+            case 'n' -> "\n";
+            case 'r' -> "\r";
+            case 't' -> "\t";
+            case 's' -> " ";
+            case '0' -> "\0";
+            default -> String.valueOf(escaped);
+        };
+    }
 }

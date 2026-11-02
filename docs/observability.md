@@ -132,10 +132,62 @@ structured logging — no extra dependency):
 | default / `local` (dev) | human-readable colored text |
 | `cloud`, `dc` (prod) | one **JSON** object per line (`logstash` schema) |
 
-JSON fields: `@timestamp`, `level`, `logger_name`, `thread_name`, `message`,
-`stack_trace` (on exceptions), plus static `application=hamstrack` and
-`deployment=<cloud|dc>`. MDC values are included, leaving a slot for a future
-`requestId`/`traceId`.
+JSON fields: `@timestamp`, `@version`, `level`, `level_value`, `logger_name`,
+`thread_name`, `message`, `stack_trace` (on exceptions), plus static
+`application=hamstrack` and `deployment=<cloud|dc>`. MDC values are included,
+leaving a slot for a future `requestId`/`traceId` — and so are **SLF4J key-value
+pairs**, which become top-level members with the key verbatim
+(`"field.name":"Team labels"`). They share one namespace with everything above:
+a pair named after a field already written makes the encoder throw and the record
+is **lost**, not renamed — and so does the same pair name attached twice on one
+record, or a pair whose name is also an MDC key on that thread. The encoder's
+buffer is not reset when that happens, so the **next** record on the same thread
+is emitted with the lost one's fragment in front of it and does not parse as JSON
+(measured 2026-11-02; the corruption is one record deep and does not cross
+threads). Nothing can count this at runtime — the throw is inside logback — so it
+is held at build time by `ForgeableLogRecordTest` and `LogRecordsTest`, which
+encode every record published under the prefixes below.
+
+#### What an extractor may rely on
+
+A record **whose first token is a published prefix** may be keyed on by that
+prefix and by its members. Published prefixes, and the members each carries:
+
+| Prefix | Members |
+|---|---|
+| `shadowed-field-def:` | `field.id`, `field.scope`, `field.key`, `field.name`, `field.builtin` — on the per-row WARN only; the summary, the clean-instance DEBUG and the `scan could not run` WARN carry none. One per-row variant omits `field.builtin` and says so in its message: the database folded the row's key into a registered search name and the JVM's case fold does not, so no built-in name can be named for it. That variant is **defensive, not observed** — on the collation measured (2026-11-02, en_US.utf8: the only characters above U+00FF whose Postgres `lower()` is a single ASCII letter are U+0130 and U+212A, and Java's `equalsIgnoreCase` folds both the same way) no row can reach it. An extractor tolerates the shape — a missing `field.builtin` is not itself an anomaly — but the record is a shadowed-field finding like any other under this prefix and is not to be suppressed: on a deployment whose collation does fold that way, the row really is shadowed, this is the only per-row record it gets, and the summary WARN counts it under the same prefix |
+| `field-key-rename:` | `field.id`, `field.scope`, `field.key.old`, `field.key.new`, `actor.id` |
+
+This table is the contract, and it is **derived, not remembered**:
+`ForgeableLogRecordTest` parses the prefix column above and asserts set equality
+in both directions against the records it finds in the source — a prefix listed
+here with no machine-readable record behind it, or a record that joined the tier
+without a row here, reds the build.
+
+`field.scope` has one grammar on every record that carries it:
+`workspace <uuid>` | `project <uuid>` | `global`. A finding can therefore be
+routed to a tenant from the record alone, with no second lookup.
+
+For those records: **the `message` is prose for a human and carries no text a row
+or a request supplied — never parse it.** Every foreign value is in a member,
+verbatim, where the JSON encoder escapes `"`, `\` and newlines, so a value cannot
+close its member, open a second one or imitate the record's structure. The one
+normalisation applied is that every Unicode line terminator becomes a single
+space — a CRLF pair counts as one terminator and collapses to one space, so such
+a value is one character shorter than the column holds; nothing else is
+rewritten, and nothing is truncated or dropped.
+
+**Every other record promises nothing.** Its `message` is prose, it may contain
+text a row supplied, and no rule may key on it. A record that grows a prefix does
+not join the table by doing so — `ForgeableLogRecordTest` demands a written
+verdict for every candidate it finds in the source and pins the members above
+against the running code, so joining is a deliberate edit here.
+
+Under the dev/`local` console pattern, key-value pairs are **dropped** (`%m`
+renders the message alone), so the members are invisible there. Both shipped
+profiles are JSON. Do not add `%kvp` to a console pattern to get them back: it
+quotes with `"` and escapes nothing, which is the forgeable convention this
+contract exists to remove.
 
 Verbosity is env-driven:
 

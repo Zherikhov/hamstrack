@@ -555,4 +555,163 @@ class SourceCallSitesTest {
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("reports clean for ever");
     }
+
+    /**
+     * <strong>{@link SourceCallSites#logSites} in both directions</strong> — the forms it must see
+     * and the forms it must not (HD-341).
+     *
+     * <p>The floor on the "must see" side is the whole reason this arm exists. {@code
+     * ForgeableLogRecordTest} enumerates every log template carrying a published prefix and demands
+     * a verdict for each; a parser that lost one <em>form</em> would shrink that population while
+     * its floor stayed satisfied by the survivors, which is silent in exactly the direction a seal
+     * cannot afford. The fluent form is the one at risk, because moving a record's foreign values
+     * into key-value members is what converts the first form into the second — so the change the
+     * seal exists to watch is also the change that would hide it.
+     */
+    @Test
+    void logSitesSeesBothCallFormsAndNeitherProseNorAForeignLog() {
+        var unit = new SourceCallSites.CompilationUnit(Path.of("Planted.java"), "Planted", List.of(
+                "    /** Javadoc quoting log.warn(\"quoted: {}\", x) is prose, not a call. */",
+                "    void classic() {",
+                "        log.warn(\"wrapped-prefix: custom field '{}' is shadowed by the \"",
+                "                + \"built-in '{}'.\", name, builtIn);",
+                "        // log.error(\"commented-out: {}\", x);",
+                "    }",
+                "",
+                "    void fluent() {",
+                "        log.atInfo()",
+                "                .addKeyValue(\"field.key\", key)",
+                "                .addKeyValue(\"field.name\", name)",
+                "                .log(\"fluent-prefix: field {} renamed\", id);",
+                "    }",
+                "",
+                "    void notALogger() {",
+                "        auditTrail.log(\"audit-prefix: {}\", id);",
+                "        log.warn(composedElsewhere, id);",
+                "    }"));
+
+        var sites = SourceCallSites.logSites(unit);
+
+        assertThat(sites).as("""
+                every form this tree writes, and nothing else — a parser that lost one of these \
+                would shrink a population whose floor the survivors still satisfy""")
+                .hasSize(2);
+        assertThat(sites.get(0).template())
+                .as("a template wrapped over two lines is one template; a seal reading only the "
+                    + "first literal cannot see a quoted placeholder in the second")
+                .isEqualTo("wrapped-prefix: custom field '{}' is shadowed by the built-in '{}'.");
+        assertThat(sites.get(0).prefix()).isEqualTo("wrapped-prefix:");
+        assertThat(sites.get(0).level()).isEqualTo("warn");
+        assertThat(sites.get(0).keys()).isEmpty();
+        assertThat(sites.get(0).line()).isEqualTo(3);
+        assertThat(sites.get(0).method()).isEqualTo("classic");
+
+        assertThat(sites.get(1).template()).isEqualTo("fluent-prefix: field {} renamed");
+        assertThat(sites.get(1).level()).isEqualTo("info");
+        assertThat(sites.get(1).keys())
+                .as("the members of this chain, in order, so a seal can compare them against the "
+                    + "keys the running code emitted")
+                .containsExactly("field.key", "field.name");
+        assertThat(sites.get(1).method()).isEqualTo("fluent");
+
+        assertThat(sites.stream().map(SourceCallSites.LogSite::template))
+                .as("""
+                        prose, a commented-out call, a .log( on something that is not our logger, \
+                        and a template that is not a literal are all absent — the first three \
+                        would invent a member, the fourth cannot be read and is lost knowingly""")
+                .noneMatch(t -> t.startsWith("quoted:") || t.startsWith("commented-out:")
+                                || t.startsWith("audit-prefix:"));
+    }
+
+    /**
+     * <strong>The assumption under {@link SourceCallSites#logSites}: every logger is named
+     * {@code log}</strong> (HD-341 fix round).
+     *
+     * <p>The scan recognises {@code log.warn(} and {@code log.at*()…log(} and nothing else, so a
+     * class that declared {@code private static final Logger LOG} would have every record it
+     * writes silently absent from {@code ForgeableLogRecordTest}'s population — a record could
+     * acquire a published prefix there and never be asked for a verdict, with the floor still
+     * satisfied by the survivors. That is the HD-343 shape, and the answer is the same one: the
+     * assumption is a live check, not a sentence in a javadoc.
+     *
+     * <p>MEASURED 2026-11-01: 45 classes carry Lombok {@code @Slf4j} (which names the field
+     * {@code log}) and exactly one declares a {@code Logger} by hand — {@code PermissionConverter},
+     * as {@code log}. Both floors are here because the two populations break differently: a
+     * {@code @Slf4j} count that collapsed would mean the walk stopped reading files, while the
+     * hand-rolled one is the member this arm is really about and it is a population of one.
+     */
+    @Test
+    void everyLoggerInTheProductionTreeIsNamedLog() throws IOException {
+        var declaration = java.util.regex.Pattern.compile(
+                "^\\s*(?:private|protected|public)?\\s*(?:static\\s+)?(?:final\\s+)?"
+                + "(?:org\\.slf4j\\.)?Logger\\s+(\\w+)\\s*=");
+        var offenders = new ArrayList<String>();
+        var handRolled = 0;
+        var lombok = 0;
+
+        for (var unit : SourceCallSites.unitsUnder(SourceCallSites.MAIN_SOURCES, Set.of())) {
+            var lines = unit.lines();
+            for (var i = 0; i < lines.size(); i++) {
+                var line = lines.get(i);
+                if (!SourceCallSites.isCode(line.trim())) {
+                    continue;
+                }
+                if (line.trim().startsWith("@Slf4j")) {
+                    lombok++;
+                }
+                var matcher = declaration.matcher(line);
+                if (!matcher.find()) {
+                    continue;
+                }
+                handRolled++;
+                if (!matcher.group(1).equals("log")) {
+                    offenders.add(unit.path() + ":" + (i + 1) + "  " + line.strip());
+                }
+            }
+        }
+
+        assertThat(offenders)
+                .as("""
+                    A LOGGER IN src/main/java IS NOT NAMED log, SO ITS RECORDS ARE INVISIBLE TO \
+                    SourceCallSites.logSites.
+
+                    Every seal built on that walk - ForgeableLogRecordTest's verdict ledger among \
+                    them - would stop seeing the record(s) above, in the false-green direction: a \
+                    record there could grow a published prefix and never be asked for a verdict. \
+                    Rename the field to log, or teach logSites the receiver here, in the one \
+                    parser, and widen this arm to the names it accepts.""")
+                .isEmpty();
+        assertThat(lombok)
+                .as("classes carrying @Slf4j: %d, under the floor of %d - a collapse here means "
+                    + "the walk stopped reading files, not that the tree stopped logging", lombok,
+                        SLF4J_FLOOR)
+                .isGreaterThanOrEqualTo(SLF4J_FLOOR);
+        assertThat(handRolled)
+                .as("hand-rolled Logger declarations: %d. The floor is 1 because this arm's whole "
+                    + "subject is the hand-rolled kind - with none found, the pattern could be "
+                    + "broken and the arm would read as coverage", handRolled)
+                .isGreaterThanOrEqualTo(1);
+    }
+
+    /** MEASURED 2026-11-01: 45 classes under {@code src/main/java} carry {@code @Slf4j}. */
+    private static final int SLF4J_FLOOR = 35;
+
+    /**
+     * {@code prefix()} is about a <em>published token</em>, not about punctuation: a colon that
+     * follows an interpolated value is prose, and counting it would put nine ordinary sentences
+     * into a tier whose whole value is being small on purpose.
+     */
+    @Test
+    void aColonAfterAPlaceholderIsNotAPrefix() {
+        var unit = new SourceCallSites.CompilationUnit(Path.of("Planted.java"), "Planted", List.of(
+                "    void prose() {",
+                "        log.info(\"renamed {} to {}: nothing else changed\", a, b);",
+                "        log.info(\"no colon at all {}\", a);",
+                "        log.info(\"SSE: subscriber {} attached\", a);",
+                "    }"));
+
+        assertThat(SourceCallSites.logSites(unit).stream()
+                .map(SourceCallSites.LogSite::prefix))
+                .containsExactly(null, null, "SSE:");
+    }
 }

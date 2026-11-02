@@ -468,6 +468,14 @@ cannot see is indistinguishable from one that does not exist, and its existence 
   (PATCH …/fields/<uuid>); see docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.
   ```
   plus one summary line `shadowed-field-def: <n> custom field definition(s) are shadowed by built-in search names`.
+
+  > **Superseded by HD-341 (2026-11-01), and this block is kept as the record of what shipped.**
+  > The name and the key are text a *row* supplied, and a display name that closed the `'`
+  > delimiter continued in the template's own grammar — one plausible record naming a workspace the
+  > row does not belong to, on every boot. Both values now travel in `field.name` / `field.key`
+  > key-value members and the message is built from minted values only. The live format is
+  > `docs/observability.md` § *What an extractor may rely on*; the same supersession applies to
+  > AC-9 below.
 - It emits ids, keys, names and scope ids — **never issue data, never field values**.
 
 **What a self-hoster actually sees, and where.** This matters more than the mechanism:
@@ -615,8 +623,18 @@ decision rather than an omission.**
   right default, so there is nothing to configure.
 - The startup scan is one indexed-table read at boot in both modes. No storage, mail, auth or
   billing surface is touched, so no self-hosted path is missing.
-- **Cloud alerting** keys on the `shadowed-field-def:` log prefix in Loki (the stack is deployed and
-  log-based alerting is what it is for).
+- **Cloud alerting** *may* key on the `shadowed-field-def:` log prefix in Loki (the stack is
+  deployed and log-based alerting is what it is for).
+
+  > **Corrected 2026-11-01 (HD-341): this was a plan, and the present tense made it read as a
+  > shipped mechanism.** MEASURED on that date — `grep -rn "shadowed" observability/ ops/` returns
+  > nothing, so no deployed rule keys on this prefix. The sentence had already re-seeded itself
+  > once, into a test javadoc that attributed the advice to `docs/self-hosting-upgrades.md` (which
+  > never carried it) and from there into a ticket premise. What the prefix *does* carry is a
+  > contract an extractor may rely on, written where such rules are written —
+  > `docs/observability.md` § *What an extractor may rely on* — and held by
+  > `ForgeableLogRecordTest`. If a Cloud rule ships, its read-back belongs in
+  > `ops/CHANGELOG-console.md` at that time.
 - **Rejected: a Micrometer gauge** (`hamstrack_shadowed_field_defs`). A gauge set once at boot goes
   stale the moment an admin renames out of the collision and stays wrong until the next restart —
   a metric that lies about a fix is worse than no metric. Re-querying on scrape puts a database read

@@ -11557,8 +11557,8 @@ components:
             refused with `400` `Name must not contain control characters`, at
             this door and on `PATCH /admin/fields/{id}` alike. The display name
             is written to the server log by the shadowed-field startup report,
-            where a newline would forge a second line under a prefix operators
-            alert on. `description` keeps its line breaks but is not otherwise
+            where a newline would forge a second line under a published log
+            prefix. `description` keeps its line breaks but is not otherwise
             exempt — see its own entry.
         key:
           type: string

@@ -10,6 +10,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.FixtureRows;
 import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
@@ -30,6 +31,7 @@ import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -107,25 +109,54 @@ class ShadowedFieldKeyRenameTest {
 
     private static final String RESERVED_MESSAGE_FRAGMENT = "is a reserved search field name";
 
-    /** Every {@code field_defs} row this class inserted — see {@link #removeTheFieldsThisTestInserted()}. */
-    private final java.util.List<UUID> insertedFieldIds = new java.util.ArrayList<>();
-
     /**
-     * <strong>Delete what was inserted, because a live claimed-key row is a permanent WARN.</strong>
+     * <strong>Every {@code field_defs} row this class created, and its removal — read back</strong>
+     * (HD-329's mechanism; this class was converted to it in HD-341's fix round).
+     *
+     * <p>A live claimed-key row left behind is one {@code ShadowedFieldStartupScan} names at the
+     * boot of every Spring context in the suite, for ever, on a shared database that keeps it.
      * Every fixture here writes one straight through the repository — deliberately, since that is
-     * how the shadowed population really arose — and a row left behind is one
-     * {@code ShadowedFieldStartupScan} names at the boot of every Spring context in the suite,
-     * for ever, on a shared database that keeps it. {@code ShadowedFieldReportingTest} carries the
-     * same block for the same reason.
+     * how the shadowed population really arose.
+     *
+     * <p>What the hand-kept {@code List<UUID>} + {@code deleteAllById} this replaces could not do
+     * is <em>verify</em>: a delete that silently does nothing looks exactly like one that worked.
+     * It also had no census — which this class now carries, below — and that is not hypothetical
+     * here: rows keyed {@code prose_field}
+     * accumulated one per run of {@link #aDescriptionMayStillContainLineBreaks()}, which creates
+     * its row through the API and so was never on that list — MEASURED 2026-11-01, <strong>89 of
+     * them</strong> on the development database, where a first count restricted to the last three
+     * hours found four and read as a rounding error. They were harmless (an unclaimed key in a
+     * workspace each run created, invisible to the startup scan) and they were invisible to the
+     * suite, which is the half worth fixing.
      *
      * <p>{@code field_set_items} and {@code issue_field_values} reference {@code field_defs} with
-     * {@code ON DELETE CASCADE} (V1), so the definition is the only row to remove, and
-     * {@code deleteAllById} is a no-op for one a test already deleted.
+     * {@code ON DELETE CASCADE} (V1), so the definition is the only row to remove.
      */
+    private final FixtureRows planted = new FixtureRows();
+
+    /**
+     * <strong>The census, because the one measured silent failure in this family happened
+     * here.</strong>
+     *
+     * <p>{@link FixtureRows#watch} is optional per member — a class that legitimately leaves rows in
+     * the table it watches must not have it — and this class leaves none: every site that creates a
+     * {@code field_defs} row records it, the two global rows included, and the only row born through
+     * the API is recorded at the call that made it. Without the census a creation nobody recorded is
+     * invisible exactly the way the {@code prose_field} rows were, so the arm that would have found
+     * them belongs on the class they were found in.
+     *
+     * <p>Seen red rather than reasoned about: with the one API recording below removed, this arm
+     * failed with {@code field_defs: 12309 rows before this test, 12310 after} and the remedy in its
+     * message (MEASURED 2026-11-02), and the stranded row was removed again afterwards.
+     */
+    @BeforeEach
+    void countFieldDefsBefore() {
+        planted.watch(fieldDefRepository, "field_defs");
+    }
+
     @org.junit.jupiter.api.AfterEach
     void removeTheFieldsThisTestInserted() {
-        fieldDefRepository.deleteAllById(insertedFieldIds);
-        insertedFieldIds.clear();
+        planted.deleteAll();
     }
 
     // ============================================================== the rename itself
@@ -289,13 +320,12 @@ class ShadowedFieldKeyRenameTest {
         global.setName("Inherited " + Unique.token());
         global.setType(FieldType.TEXT);
         global = fieldDefRepository.saveAndFlush(global);
-        try {
-            rename(ctx, ctx.fieldId, global.getKey())
-                    .andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.detail", containsString("already exists or is inherited")));
-        } finally {
-            fieldDefRepository.delete(global);
-        }
+        planted.record(fieldDefRepository, global.getId(),
+                "global field_defs row '" + global.getKey() + "'");
+
+        rename(ctx, ctx.fieldId, global.getKey())
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.detail", containsString("already exists or is inherited")));
     }
 
     /**
@@ -336,26 +366,28 @@ class ShadowedFieldKeyRenameTest {
         global.setType(FieldType.TEXT);
         global.setArchivedAt(Instant.now());   // archived, so it never reaches a warning surface
         global = fieldDefRepository.saveAndFlush(global);
-        try {
-            rename(ctx, global.getId(), "team_fix_version")
-                    .andExpect(status().isNotFound())
-                    .andExpect(jsonPath("$.detail").value("Field not found"));
+        // Recorded, not hand-deleted in a finally: this is a GLOBAL row under a registry-claimed
+        // key, the exact subject FixtureRows exists for, and the id survives the rename below
+        // because the recording is keyed on the id and not on the key.
+        planted.record(fieldDefRepository, global.getId(),
+                "global field_defs row 'fixversion' (renamed in-test)");
 
-            // …and the instance admin can, which is what makes the 404 a SCOPE answer rather than
-            // a blanket refusal. Archived is deliberate: shadowedBy is archive-blind, so the
-            // affordance is offered here too (§7.1) — rename-then-unarchive is the recovery path.
-            var adminToken = instanceAdminToken();
-            mockMvc.perform(patch("/api/admin/fields/" + global.getId())
-                            .header("Authorization", "Bearer " + adminToken)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .content("{\"name\":\"" + global.getName()
-                                     + "\",\"type\":\"TEXT\",\"key\":\"hd275_global_renamed\"}"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.key").value("hd275_global_renamed"))
-                    .andExpect(jsonPath("$.shadowedBy").value(org.hamcrest.Matchers.nullValue()));
-        } finally {
-            fieldDefRepository.deleteById(global.getId());
-        }
+        rename(ctx, global.getId(), "team_fix_version")
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Field not found"));
+
+        // …and the instance admin can, which is what makes the 404 a SCOPE answer rather than
+        // a blanket refusal. Archived is deliberate: shadowedBy is archive-blind, so the
+        // affordance is offered here too (§7.1) — rename-then-unarchive is the recovery path.
+        var adminToken = instanceAdminToken();
+        mockMvc.perform(patch("/api/admin/fields/" + global.getId())
+                        .header("Authorization", "Bearer " + adminToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"" + global.getName()
+                                 + "\",\"type\":\"TEXT\",\"key\":\"hd275_global_renamed\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.key").value("hd275_global_renamed"))
+                .andExpect(jsonPath("$.shadowedBy").value(org.hamcrest.Matchers.nullValue()));
     }
 
     /**
@@ -622,19 +654,32 @@ class ShadowedFieldKeyRenameTest {
     // ============================================================ the display name is logged
 
     /**
-     * <strong>The display name reaches a log line under a prefix operators alert on, so it is
-     * single-line at the edge.</strong>
+     * <strong>The display name reaches a record under a published prefix, so it is single-line at
+     * the edge.</strong>
      *
-     * <p>{@code ShadowedFieldStartupScan} prints {@code shadowed-field-def: custom field '<name>'
-     * …} once per boot, and {@code docs/self-hosting-upgrades.md} ("Shadowed custom field keys from
-     * 0.18.0") tells operators to key their alerting on that prefix. {@code UpsertFieldRequest.name} was bounded only in length, so a taxonomy admin
-     * who owns a live shadowed field — exactly the population that gets printed — could put a line
-     * terminator in the <em>display name</em> and forge a second line under the prefix at every
-     * boot, for ever, in somebody else's alerting.
+     * <p>{@code ShadowedFieldStartupScan} reports it once per boot under
+     * {@code shadowed-field-def:}, which {@code docs/observability.md} publishes as
+     * machine-readable: an extractor may key on that prefix and on the record's {@code field.*}
+     * members. <strong>No shipped alert rule keys on it today</strong> — {@code grep -rn shadowed
+     * observability/ ops/} returns nothing (MEASURED 2026-11-01), and the sentence this javadoc
+     * used to carry, that {@code docs/self-hosting-upgrades.md} "tells operators to key their
+     * alerting on that prefix", was never true of that file; the claim came from a design document
+     * (HD-341). What is true is that the record is the only signal for this defect, it is quoted
+     * verbatim for operators, and a forged copy of it repeats on every boot for ever.
+     * {@code UpsertFieldRequest.name} was bounded only in length, so a taxonomy admin who owns a
+     * live shadowed field — exactly the population that gets reported — could put a line terminator
+     * in the <em>display name</em> and split that record in two.
      *
      * <p>Both minting doors are asserted because they share the DTO and would fail independently:
      * an annotation added to a record is not evidence that both endpoints validate the record.
-     * The key needed nothing — it has been {@code [a-z0-9_]} since V1.
+     *
+     * <p><strong>The key needed nothing <em>at these two doors</em></strong> — it has been
+     * {@code [a-z0-9_]} there since V1. That is a statement about doors and not about the column:
+     * {@code field_defs.key} is {@code varchar(50)} with no CHECK constraint (MEASURED 2026-11-01
+     * against {@code pg_constraint}), and this whole feature exists because rows reach that column
+     * by a migration, a seeder and direct SQL. The durable half of the guard is at the sink, where
+     * every route passes — {@code LogValues.oneLine} and, since HD-341, carrying both values in
+     * key-value members instead of in the message.
      */
     @Test
     void aDisplayNameCarryingALineTerminatorIsRefusedAtBothDoors() throws Exception {
@@ -670,13 +715,21 @@ class ShadowedFieldKeyRenameTest {
     void aDescriptionMayStillContainLineBreaks() throws Exception {
         var ctx = fixture("labels", "Team labels");
 
-        mockMvc.perform(post(adminFieldsUrl(ctx))
+        var created = mockMvc.perform(post(adminFieldsUrl(ctx))
                         .header("Authorization", "Bearer " + ctx.token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"Prose field\",\"key\":\"prose_field\",\"type\":\"TEXT\""
                                  + ",\"description\":"
                                  + json.writeValueAsString("first\nsecond") + "}"))
-                .andExpect(status().isCreated());
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+
+        // The one row in this class created through the API rather than through a fixture, so the
+        // teardown cannot know it without being told. 89 copies of it were on the development
+        // database before this line existed (MEASURED 2026-11-01, HD-341 fix round).
+        planted.record(fieldDefRepository,
+                UUID.fromString(json.readTree(created).get("id").asText()),
+                "field_defs row 'prose_field' created through the API");
     }
 
     // ============================================ the catch that only works with saveAndFlush
@@ -864,7 +917,7 @@ class ShadowedFieldKeyRenameTest {
         f.setName(name);
         f.setType(FieldType.TEXT);
         f = fieldDefRepository.saveAndFlush(f);
-        insertedFieldIds.add(f.getId());
+        planted.record(fieldDefRepository, f.getId(), "project field_defs row '" + key + "'");
         return f;
     }
 
@@ -875,7 +928,7 @@ class ShadowedFieldKeyRenameTest {
         f.setName(name);
         f.setType(FieldType.TEXT);
         f = fieldDefRepository.saveAndFlush(f);
-        insertedFieldIds.add(f.getId());
+        planted.record(fieldDefRepository, f.getId(), "workspace field_defs row '" + key + "'");
 
         var item = new FieldSetItem();
         item.setSet(fieldSetRepository.findById(ctx.setId).orElseThrow());

@@ -209,7 +209,14 @@ public final class CsvWriter {
         };
     }
 
-    /** Flattens the characters that would end a comment line early. */
+    /**
+     * Flattens the characters that would end a comment line early.
+     *
+     * <p>Narrower than {@code common.observability.LogValues.oneLine} on purpose, and not the same
+     * method: a CSV reader ends a record at CR/LF and at nothing else, while a log shipper splits
+     * on NEL and the line/paragraph separators too. {@code null} is the empty cell here and stays
+     * {@code null} there.
+     */
     private static String oneLine(String value) {
         return value == null ? "" : value.replace('\r', ' ').replace('\n', ' ');
     }

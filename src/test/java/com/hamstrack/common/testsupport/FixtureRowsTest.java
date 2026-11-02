@@ -226,6 +226,34 @@ class FixtureRowsTest {
                     }
                 }
                 """);
+        plant(root, "Qualified.java", """
+                class Qualified {
+
+                    private final com.hamstrack.common.testsupport.FixtureRows rows =
+                            new com.hamstrack.common.testsupport.FixtureRows();
+
+                    @Test
+                    void createsAGlobalRow() {
+                        rows.record(workflowRepository, id, "global workflow");
+                    }
+                }
+                """);
+        plant(root, "QualifiedTeardown.java", """
+                class QualifiedTeardown {
+
+                    private final FixtureRows rows = new FixtureRows();
+
+                    @org.junit.jupiter.api.AfterEach
+                    void dropGlobalRows() {
+                        rows.deleteAll();
+                    }
+
+                    @Test
+                    void createsAGlobalRow() {
+                        rows.record(workflowRepository, id, "global workflow");
+                    }
+                }
+                """);
 
         var shared = new ArrayList<String>();
         var local = new ArrayList<String>();
@@ -234,7 +262,7 @@ class FixtureRowsTest {
             collectHolders(unit, shared, local, undrained);
         }
 
-        assertThat(undrained).hasSize(2);
+        assertThat(undrained).hasSize(3);
         assertThat(String.join("\n", undrained))
                 .as("the field with no @AfterEach and the local its test forgot — and neither twin, "
                     + "one of which drains through a `::deleteAll` method reference")
@@ -242,15 +270,53 @@ class FixtureRowsTest {
                 .contains("Local#forgetsItsOwn")
                 .doesNotContain("Careful")
                 .doesNotContain("drainsItsOwn");
-        assertThat(shared).as("two planted fields, one correct and one not").hasSize(2);
+        assertThat(String.join("\n", undrained))
+                .as("""
+                        AND THE FULLY QUALIFIED FORM, which this predicate did not see until a \
+                        holder was written that way during HD-341 and the shared count did not \
+                        move. A holder a population cannot see is excused for ever while the \
+                        floor stays satisfied by the survivors - the one direction a wiring seal \
+                        cannot afford.""")
+                .contains("Qualified.java");
+        assertThat(String.join("\n", undrained))
+                .as("""
+                        AND A QUALIFIED @AfterEach STILL DRAINS. The annotation pattern missed \
+                        @org.junit.jupiter.api.AfterEach, so a class that does clean up was \
+                        accused of not cleaning up - a false red on an innocent file is how a \
+                        seal gets switched off, which costs it every true one as well.""")
+                .doesNotContain("QualifiedTeardown");
+        assertThat(shared)
+                .as("four planted fields: one correct, one not, one qualified type, one qualified "
+                    + "teardown")
+                .hasSize(4);
         assertThat(local).as("two planted locals, one correct and one not").hasSize(2);
     }
 
-    /** {@code FixtureRows x = new FixtureRows()} and {@code var x = new FixtureRows()} alike. */
-    private static final Pattern CONSTRUCTION =
-            Pattern.compile("(?:FixtureRows|var)\\s+(\\w+)\\s*=\\s*new\\s+FixtureRows\\s*\\(");
+    /**
+     * {@code FixtureRows x = new FixtureRows()}, {@code var x = new FixtureRows()} and the
+     * package-qualified spelling of either alike.
+     *
+     * <p>The qualified form was added in HD-341's fix round, after two holders were written that
+     * way and <em>neither</em> entered the population: the shared count did not move, nothing was
+     * reported, and the floor was still satisfied by the five that did match. That is the shape
+     * this file exists to refuse, one level further up again — a member a population cannot see is
+     * excused for ever — and it is why {@link #aHolderWithNoTeardownAndAnUndrainedLocalAreBothNamed}
+     * now plants that spelling too.
+     */
+    private static final Pattern CONSTRUCTION = Pattern.compile(
+            "(?:(?:[\\w.]+\\.)?FixtureRows|var)\\s+(\\w+)\\s*=\\s*new\\s+(?:[\\w.]+\\.)?"
+            + "FixtureRows\\s*\\(");
 
-    private static final Pattern AFTER_EACH = Pattern.compile("^\\s*@AfterEach\\b");
+    /**
+     * {@code @AfterEach}, however it is spelled — the fully qualified
+     * {@code @org.junit.jupiter.api.AfterEach} included, which one class in this family really uses
+     * and which this pattern did not match until HD-341's fix round. The consequence was in the
+     * worst direction available to a wiring seal: a class that <em>does</em> drain its rows was
+     * reported as draining nothing, so the honest fix and the false accusation look identical to a
+     * reader deciding whether to trust the arm.
+     */
+    private static final Pattern AFTER_EACH =
+            Pattern.compile("^\\s*@(?:[\\w.]+\\.)?AfterEach\\b");
 
     /**
      * Class-body indentation, i.e. a field rather than a statement inside a method — the same
@@ -263,7 +329,13 @@ class FixtureRowsTest {
     // local floor is not decoration: without a local in the tree, asking the question per
     // CONSTRUCTION rather than per class would be indistinguishable from asking it per class, and
     // that collapse is the HD-306 shape this suite keeps re-learning.
-    private static final int SHARED_HOLDER_FLOOR = 3;
+    //
+    // Both measured 2026-11-02 against src/test/java, and both are exactly the live count: a floor
+    // left behind the population it bounds is the same defect as a pattern that stops matching, and
+    // HD-341 shipped both halves at once — CONSTRUCTION missed the qualified spelling while the
+    // floor of 3 stayed satisfied by the survivors. Raise this line in the same edit that adds a
+    // holder; the [fixture-rows] census printed beside it is the number to copy.
+    private static final int SHARED_HOLDER_FLOOR = 7;
     private static final int LOCAL_INSTANCE_FLOOR = 4;
 
     /**

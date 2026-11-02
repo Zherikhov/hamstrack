@@ -31,8 +31,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * creates such a row records it here and an {@code @AfterEach} removes it.
  *
  * <h2>Why this is one class and not a line in each test</h2>
- * Three classes needed the same delete-and-verify loop, and a loop copied three times is how this
- * repository's folds drifted. The verification is the point: {@link #deleteAll()} asserts the rows
+ * Three classes needed the same delete-and-verify loop when it was extracted (a count of that
+ * moment, not of today — the holders are enumerated by the seal named below), and a loop copied
+ * three times is how this repository's folds drifted.
+ * The verification is the point: {@link #deleteAll()} asserts the rows
  * are <em>gone</em>, so a delete that silently does nothing (a repository whose
  * {@code deleteById} is a no-op for a missing id, a row held by a foreign key) reds the test that
  * created it rather than being discovered a month later in a row count.
@@ -40,7 +42,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>The <em>wiring</em> has the same property one level up — a class that holds one of these and
  * forgets the {@code @AfterEach} deletes nothing, asserts nothing and passes — so that is sealed
  * too, by {@code FixtureRowsTest#everyHolderOfAFixtureRowsDrainsItInATeardown}, over every
- * construction in {@code src/test/java} rather than over the three that exist today.
+ * construction in {@code src/test/java} rather than over the ones that exist today — and that arm
+ * carries a floor on the population it found, because a seal asserting "nothing is undrained" reads
+ * clean for ever the moment its pattern stops matching. The live count is in the
+ * {@code [fixture-rows]} line that arm prints; a number here would go stale one holder before the
+ * list does, which this very sentence did.
  *
  * <h2>What it must not be used for</h2>
  * A row another row still points at. The reported ticket recorded this precisely: the accumulated

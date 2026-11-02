@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.common.observability.LogValues;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.repository.FieldDefRepository;
 import lombok.RequiredArgsConstructor;
@@ -10,7 +11,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
-import java.util.regex.Pattern;
 
 /**
  * <strong>The instance names, once per boot, every custom field definition a built-in search name
@@ -55,12 +55,20 @@ import java.util.regex.Pattern;
  * {@code CalledOnlyFromSealTest} checks against the real call graph, so this class losing its
  * exclusivity is a red build and not a stale paragraph.
  *
- * <p>Every line carries the stable {@code shadowed-field-def:} prefix so log-based alerting (Loki,
- * in Cloud) can key on it without parsing prose — which is also why every value a <em>row</em>
- * supplies goes through {@link #oneLine} first: see its javadoc for why the DTO's bound on the
- * display name cannot be the whole guard. Deliberately not a Micrometer gauge: a gauge set
- * once at boot goes stale the moment an admin renames out of the collision and stays wrong until
- * the next restart, and a metric that lies about a fix is worse than no metric.
+ * <p>Every record carries the stable {@code shadowed-field-def:} prefix, which is one of the two
+ * prefixes {@code docs/observability.md} publishes as machine-readable — so a Loki rule may key on
+ * it, and on the {@code field.*} members, and must never parse the message. That listing is what
+ * makes this record's shape a promise rather than a wording, and it is why <strong>no value a row
+ * supplied is interpolated into the message</strong> (HD-341): the display name and the key travel
+ * in {@code field.name} and {@code field.key}, where the JSON encoder escapes them and they cannot
+ * imitate the record's own structure. Before that they sat inside {@code '…'} delimiters, and a
+ * display name closing that quote and continuing in the template's grammar produced one plausible
+ * record naming a workspace the row does not belong to — on every boot, for ever, because nothing
+ * rewrites the row. {@code ForgeableLogRecordTest} holds it.
+ *
+ * <p>Deliberately not a Micrometer gauge: a gauge set once at boot goes stale the moment an admin
+ * renames out of the collision and stays wrong until the next restart, and a metric that lies
+ * about a fix is worse than no metric.
  */
 @Component
 @Slf4j
@@ -130,55 +138,105 @@ public class ShadowedFieldStartupScan {
             return;
         }
         for (FieldDef f : shadowed) {
-            log.warn("shadowed-field-def: custom field '{}' (key '{}', id {}, scope {}) is shadowed by the "
-                     + "built-in search field '{}'. HQL `{} = …` answers from the built-in field, not from "
-                     + "this one, and it is not offered in /search/schema. A taxonomy admin at that scope "
-                     + "can rename its key (PATCH …/fields/{}); see "
-                     + "docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.",
-                    oneLine(f.getName()), oneLine(f.getKey()), f.getId(), scopeOf(f),
-                    registry.find(f.getKey()).map(FieldDescriptor::name).orElse("?"),
-                    oneLine(f.getKey()), f.getId());
+            String claimedKey = claimedKeyOf(f);
+            FieldDescriptor builtIn = claimedKey == null
+                    ? null : registry.find(claimedKey).orElse(null);
+            if (builtIn == null) {
+                reportWithoutABuiltInName(f);
+                continue;
+            }
+            log.atWarn()
+                    .addKeyValue("field.id", f.getId())
+                    .addKeyValue("field.scope", f.scopeRef())
+                    .addKeyValue("field.key", LogValues.oneLine(f.getKey()))
+                    .addKeyValue("field.name", LogValues.oneLine(f.getName()))
+                    .addKeyValue("field.builtin", builtIn.name())
+                    .log("shadowed-field-def: a live custom field definition is shadowed by the "
+                         + "built-in search field {} — field id {}, scope {}; its key and display "
+                         + "name are in this record's field.key and field.name. HQL `{} = …` "
+                         + "answers from the built-in field, not from this one, and it is not "
+                         + "offered in /search/schema. A taxonomy admin at that scope can rename "
+                         + "its key (PATCH …/fields/{}); see "
+                         + "docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.",
+                            builtIn.name(), f.getId(), f.scopeRef(), claimedKey, f.getId());
         }
         log.warn("shadowed-field-def: {} custom field definition(s) are shadowed by built-in search names",
                 shadowed.size());
     }
 
     /**
-     * <strong>Line terminators out of any value a row supplies</strong> — the durable half of the
-     * log-forging guard, and the half that is not on a DTO.
+     * <strong>The row reported when this JVM cannot name the built-in field that took its
+     * key</strong> — the witness for the one branch where the record above cannot be built.
      *
-     * <p>{@code UpsertFieldRequest} bounds {@code name} to {@link com.hamstrack.common.util.DisplayText#SINGLE_LINE}
-     * and {@code key} to {@code [a-z0-9_]}, which closes the console door and only that door. This
-     * class exists precisely because rows arrive by other routes — a migration, a seeder, direct
-     * SQL, or the console itself before that annotation shipped — and none of them meet a DTO. A
-     * row already carrying a newline in its display name would otherwise forge a second line under
-     * the stable {@code shadowed-field-def:} prefix that the operator documentation tells people to
-     * alert on, on every boot of an upgraded instance, for ever; no later validation can reach it,
-     * because nothing rewrites the row. Escaping belongs at the sink, where every source passes.
+     * <p>It is a <em>report</em>, not a drop: the operator still gets the id, the scope, the key
+     * and the display name, which is everything the remedy needs. What it does not get is a
+     * built-in name, because there is none this instance can resolve and printing {@code ?} — what
+     * this code did until HD-341 — publishes a placeholder as a contract member. The message says
+     * so in words rather than in punctuation.
      *
-     * <p>A space rather than a removal, so a forged fragment cannot be glued onto the text around
-     * it, and the length is unchanged. The id, the scope and the built-in name are not passed
-     * through this: two are UUIDs and the third comes from our own registry.
+     * <p>It carries four of the five {@code shadowed-field-def:} members, {@code field.builtin}
+     * being the one it cannot supply; {@code docs/observability.md} says that and
+     * {@code ForgeableLogRecordTest} holds it, members and all.
+     *
+     * <p><strong>Defensive, not observed — say so rather than let the clause read as a measured
+     * case.</strong> Both ways into this branch were probed on 2026-11-02 and neither is reachable
+     * from a real row on this collation. {@link FieldRegistry#find} cannot miss a key drawn from
+     * {@link FieldRegistry#claimedKeys()} (every key in that set was lowercased when it was
+     * registered, and {@code find} lowercases its argument), so the branch needs
+     * {@link #claimedKeyOf} to return {@code null} on a row the query returned — i.e. a character
+     * Postgres folds to a claimed name and {@code equalsIgnoreCase} does not. MEASURED on
+     * {@code en_US.utf8}: the only characters above U+00FF whose {@code lower()} is a single ASCII
+     * letter are U+0130 → {@code i} and U+212A → {@code k}, and Java folds both to the same letter,
+     * so there is no such pair here. The arm that holds this record
+     * ({@code ShadowedFieldStartupScanTest#aRowWhoseKeyThisJvmCannotFoldIsReportedWithoutABuiltInName})
+     * therefore mocks the repository: it pins the record's <em>shape</em>, not its reachability. The
+     * branch stays because a collation is a deployment property, not a product one — an ICU or
+     * {@code C} collation on a self-hosted instance is free to fold differently — and the
+     * alternative at the moment it does is the {@code "?"} placeholder this replaced.
      */
-    private static String oneLine(String value) {
-        return value == null ? null : LINE_TERMINATORS.matcher(value).replaceAll(" ");
+    private void reportWithoutABuiltInName(FieldDef f) {
+        log.atWarn()
+                .addKeyValue("field.id", f.getId())
+                .addKeyValue("field.scope", f.scopeRef())
+                .addKeyValue("field.key", LogValues.oneLine(f.getKey()))
+                .addKeyValue("field.name", LogValues.oneLine(f.getName()))
+                .log("shadowed-field-def: a live custom field definition collides with a built-in "
+                     + "search name that this instance cannot name from the row's own key — field "
+                     + "id {}, scope {}; the key and display name are in this record's field.key "
+                     + "and field.name. The database folded that key into a registered name and "
+                     + "this JVM's case fold does not, so the field is unreachable in search and "
+                     + "no built-in name can be printed for it. A taxonomy admin at that scope can "
+                     + "rename its key (PATCH …/fields/{}); see "
+                     + "docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.",
+                        f.getId(), f.scopeRef(), f.getId());
     }
 
     /**
-     * Any Unicode linebreak: {@code \R} matches CRLF as one unit as well as LF, CR, NEL and
-     * the line/paragraph separators, so no shipper's idea of "a line" survives a value a row
-     * supplied.
+     * <strong>The claimed key this row collides with, taken from the registry rather than from the
+     * row</strong> — the ONE relation the record is built from, and {@code null} when there is
+     * none.
+     *
+     * <p><strong>Three relations used to decide one record, and they disagree.</strong> MEASURED
+     * 2026-11-01 on a key spelled {@code SPRINT} with U+0130 (capital I with dot above) for its
+     * {@code I}: Postgres {@code lower()} answers {@code 'sprint'}, so the query returns the row;
+     * that same key through Java's {@code toLowerCase(Locale.ROOT)} is seven characters and is
+     * <em>not</em> {@code "sprint"}, so {@link FieldRegistry#find} — which lowercases its
+     * argument — missed and
+     * the record said "shadowed by the built-in search field {@code ?}"; {@code equalsIgnoreCase}
+     * folds the same pair to true, because {@code Character.toLowerCase(U+0130)} is {@code 'i'}.
+     * So the built-in name is now resolved <em>through</em> the key found here, and the caller's
+     * only remaining question is whether this returned anything at all.
+     *
+     * <p>Returning the registry's element rather than a lowercased copy of the row's key is the
+     * other half: the one concrete key the message interpolates is then a string this codebase
+     * minted, and the row's own spelling is in {@code field.key} regardless.
+     *
+     * <p>Cost is a scan of the claimed-key set per reported row, at boot.
      */
-    private static final Pattern LINE_TERMINATORS = Pattern.compile("\\R");
-
-    /**
-     * Where the row lives, in the words the operator's own SQL uses. A global row is one shadowing
-     * that hits every workspace on the instance at once, so saying which of the three it is is the
-     * difference between one tenant's problem and everyone's.
-     */
-    private static String scopeOf(FieldDef f) {
-        if (f.getScopeProjectId() != null) return "project " + f.getScopeProjectId();
-        if (f.getScopeWorkspaceId() != null) return "workspace " + f.getScopeWorkspaceId();
-        return "global";
+    private String claimedKeyOf(FieldDef f) {
+        for (String claimed : registry.claimedKeys()) {
+            if (claimed.equalsIgnoreCase(f.getKey())) return claimed;
+        }
+        return null;
     }
 }

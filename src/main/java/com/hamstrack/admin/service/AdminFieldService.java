@@ -3,6 +3,7 @@ package com.hamstrack.admin.service;
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.observability.LogValues;
 import com.hamstrack.common.util.ColorFormat;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
@@ -176,8 +177,29 @@ public class AdminFieldService {
             // The only record a rename leaves. There is no taxonomy audit table today and building
             // one is a separate ticket (HD-275 §15 Q1); one INFO costs a line and is the difference
             // between "the key changed at some point" and an answer.
-            log.info("field-key-rename: field {} renamed from '{}' to '{}' at scope {} by user {}",
-                    f.getId(), oldKey, newKey, f.scopeLabel(), actor == null ? null : actor.getId());
+            //
+            // `field-key-rename:` is a published machine-readable prefix (docs/observability.md),
+            // so neither key is interpolated into the message: both columns are varchar with no
+            // CHECK, and a record that promises anything to a machine is built from minted values
+            // only (HD-341, ForgeableLogRecordTest). Reachability is narrower here than on the
+            // startup scan — renameTo refuses unless the OLD key is a FieldRegistry-claimed name,
+            // and the DTO bounds the new one to [a-z0-9_] — but that is a property of two guards
+            // rather than of the columns, and the record has one rule rather than two.
+            //
+            // field.scope is scopeRef() and not scopeLabel(): one member name may not carry two
+            // grammars. The startup scan's record has always emitted "workspace <uuid>" and this
+            // one emitted "WORKSPACE", so a rule routing a finding to a tenant got an id from one
+            // prefix and a label from the other — and this record carried no tenant id anywhere
+            // else, so it could not be attributed without a second lookup (HD-341).
+            log.atInfo()
+                    .addKeyValue("field.id", f.getId())
+                    .addKeyValue("field.scope", f.scopeRef())
+                    .addKeyValue("field.key.old", LogValues.oneLine(oldKey))
+                    .addKeyValue("field.key.new", LogValues.oneLine(newKey))
+                    .addKeyValue("actor.id", actor == null ? null : actor.getId())
+                    .log("field-key-rename: field {} renamed at scope {} by user {} — the old and "
+                         + "new keys are in this record's field.key.old and field.key.new.",
+                            f.getId(), f.scopeRef(), actor == null ? null : actor.getId());
         }
         return AdminFieldResponse.of(f, fieldUsage(scope, f), shadowedBy(f));
     }

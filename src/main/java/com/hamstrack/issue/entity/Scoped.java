@@ -27,4 +27,25 @@ public interface Scoped {
                 : getScopeWorkspaceId() != null ? "WORKSPACE"
                 : "GLOBAL";
     }
+
+    /**
+     * <strong>{@code "project <uuid>"} | {@code "workspace <uuid>"} | {@code "global"}</strong> —
+     * where the row lives, in the words the operator's own SQL uses, <em>with the id</em>.
+     *
+     * <p>For a log record a machine may key on: a reader routing a finding to a tenant needs the
+     * id, and a bare label costs it a second lookup. A global row is one shadowing that hits every
+     * workspace on the instance at once, so saying which of the three it is is the difference
+     * between one tenant's problem and everyone's.
+     *
+     * <p>Deliberately beside {@link #scopeLabel()} rather than copied into each writer: the two
+     * published records that carry a {@code field.scope} member must agree on its grammar, and
+     * they did not — one emitted this form and the other the bare label, under one member name
+     * (HD-341). {@code scopeLabel()} stays what the API responses return; this is what a record
+     * carries. Both are minted, so neither can be forged.
+     */
+    default String scopeRef() {
+        if (getScopeProjectId() != null) return "project " + getScopeProjectId();
+        if (getScopeWorkspaceId() != null) return "workspace " + getScopeWorkspaceId();
+        return "global";
+    }
 }

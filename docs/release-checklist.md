@@ -270,6 +270,9 @@ Two things now report a collision that the release notes should quote:
 * Every instance names its own live collisions at boot, one WARN per row, prefixed
   `shadowed-field-def:` — and `GET …/search/schema` reports them per caller in
   `shadowedFields`, so an affected tenant is no longer told only by an absence.
+  That prefix is one of those `docs/observability.md` publishes as
+  machine-readable, so what the record's `message` and its `field.*` members each
+  carry is a contract; quote the record from there rather than from memory.
   Both derive their watch set from `FieldRegistry` itself, so a newly registered
   name is covered with no second edit.
 
@@ -291,9 +294,10 @@ is none to claim: the scan catches `Exception` and degrades to a single WARN, so
 this change cannot stop a container starting.
 
 > **Your instance now names, once per boot, every custom field whose key a built-in
-> search name has taken.** One `WARN` per field, each carrying the stable prefix
-> `shadowed-field-def:`, the field's id, key, name and scope, and the built-in name
-> that took it — plus a summary line. **A healthy instance prints nothing here**, so
+> search name has taken.** One `WARN` per field, each carrying the published prefix
+> `shadowed-field-def:`, the field's id and scope and the built-in name that took
+> it, plus the field's key and display name in the record's `field.key` and
+> `field.name` members — plus a summary line. **A healthy instance prints nothing here**, so
 > an upgrade that adds no such line has already told you the answer; the three
 > archived placeholders Hamstrack seeds itself (`labels`, `sprint`, `components`)
 > are deliberately not counted.

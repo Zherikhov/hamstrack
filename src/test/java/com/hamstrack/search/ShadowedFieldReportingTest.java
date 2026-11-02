@@ -6,6 +6,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.testsupport.FixtureRows;
 import com.hamstrack.common.testsupport.Unique;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
@@ -21,6 +22,7 @@ import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -30,8 +32,6 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.contains;
@@ -87,30 +87,44 @@ class ShadowedFieldReportingTest {
     private final ObjectMapper json = new ObjectMapper();
 
     /**
-     * Every {@code field_defs} row this class inserted, in insertion order — see
-     * {@link #removeTheClaimedKeysThisTestInserted()}.
-     */
-    private final List<UUID> insertedFieldIds = new ArrayList<>();
-
-    /**
-     * <strong>Delete what was inserted, because what was inserted is a permanent WARN.</strong>
-     * This class writes <em>live</em> claimed-key {@code field_defs} rows straight through the
+     * <strong>Delete what was inserted, because what was inserted is a permanent WARN — and read
+     * the deletion back</strong> (HD-329's mechanism, adopted here in HD-341's fix round).
+     *
+     * <p>This class writes <em>live</em> claimed-key {@code field_defs} rows straight through the
      * repository — the whole point, since that is how the shadowed population really arose — and
      * every one it leaves behind is a row {@code ShadowedFieldStartupScan} then names at the boot
      * of every Spring context in the suite, for ever. Left uncleaned it measured 5,353 WARN lines,
      * 31% of one build log, and the count grew monotonically run over run: a shared dev database
      * keeps the rows, so each full run adds another dozen across every context that starts.
-     * {@code ShadowedFieldStartupScanTest} deletes its rows inline for the same reason; this one
-     * has too many insertion sites for that, so the bookkeeping is central and the delete is here.
+     *
+     * <p>The hand-kept {@code List<UUID>} + {@code deleteAllById} this replaces deleted the right
+     * rows and verified nothing, which is the one failure a teardown must not have: a delete that
+     * silently does nothing looks exactly like one that worked. Every class in this family now
+     * carries the same mechanism — {@code ShadowedFieldStartupScanTest} and
+     * {@code ShadowedFieldKeyRenameTest} included, the first of which really did delete inline (as
+     * a previous version of this paragraph said) until a failing run was observed to leave a forged
+     * row on the development database.
      *
      * <p>{@code field_set_items} and {@code issue_field_values} both reference {@code field_defs}
-     * with {@code ON DELETE CASCADE} (V1), so removing the definition is enough and no order has
-     * to be maintained here.
+     * with {@code ON DELETE CASCADE} (V1), so removing the definition is enough.
      */
+    private final FixtureRows planted = new FixtureRows();
+
+    /**
+     * <strong>The census that makes the teardown non-vacuous.</strong> {@link FixtureRows#watch} is
+     * optional per member, for a class that really does leave rows in the table — this one does not:
+     * {@link #bindField} is the only site here that creates a {@code field_defs} row and it records
+     * what it created. Without this arm a creation nobody recorded deletes nothing, asserts nothing
+     * and passes, which is how 89 rows accumulated in the sibling class of this family.
+     */
+    @BeforeEach
+    void countFieldDefsBefore() {
+        planted.watch(fieldDefRepository, "field_defs");
+    }
+
     @AfterEach
     void removeTheClaimedKeysThisTestInserted() {
-        fieldDefRepository.deleteAllById(insertedFieldIds);
-        insertedFieldIds.clear();
+        planted.deleteAll();
     }
 
     /**
@@ -268,7 +282,7 @@ class ShadowedFieldReportingTest {
         f.setName(name);
         f.setType(FieldType.TEXT);
         f = fieldDefRepository.saveAndFlush(f);
-        insertedFieldIds.add(f.getId());
+        planted.record(fieldDefRepository, f.getId(), "workspace field_defs row '" + key + "'");
 
         var item = new FieldSetItem();
         item.setSet(fieldSetRepository.findById(ctx.setId).orElseThrow());
