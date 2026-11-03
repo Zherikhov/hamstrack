@@ -486,6 +486,36 @@ class SeedGuardStartupOrderingTest {
         assertThat(message)
                 .withFailMessage("""
 
+                        ... and "the way back" has to exist for the reader this message is written \
+                        for (HD-342). Forgot password needs SMTP, "another system administrator" \
+                        needs a second one, and the console that would delete the account is behind \
+                        the sign-in the statement above has just taken away - a self-hoster with one \
+                        administrator and no mail server has none of the three. Name the route that \
+                        needs neither, in line, and point at the guide section that walks it through.
+
+                        Message was: %s""", message)
+                .contains("point SEED_ADMIN_EMAIL at an address that has NO account yet")
+                .contains("If you are the only administrator and cannot sign in");
+        assertThat(message)
+                .withFailMessage("""
+
+                        ... and "an address with no account" is load-bearing, so the message says \
+                        what happens when it is not one. Seeding does not only create: an address \
+                        that already has an account is PROMOTED to system administrator instead - \
+                        nothing is created, no password is set, the reader is still locked out, and \
+                        that account now administers every workspace on the instance. The behaviour \
+                        is measured by \
+                        SeedAdminSquatterRefusalTest#anExactlyMatchingRowIsPromotedEvenFromAMixedCaseConfiguration; \
+                        this line only holds that the reader is told. Do not write "only ever \
+                        creates" here again - it was true of two of the three branches of \
+                        DataSeeder.run.
+
+                        Message was: %s""", message)
+                .contains("PROMOTED to system administrator")
+                .doesNotContain("only ever creates");
+        assertThat(message)
+                .withFailMessage("""
+
                         This refusal can fire on an installation whose operator changed nothing \
                         today - they upgraded into it. It has to say that configuration is not what \
                         it is reading, or they will edit .env again and conclude the release is \

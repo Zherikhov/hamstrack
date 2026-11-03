@@ -1083,17 +1083,40 @@ accumulated set at once, and it is what "revoke every unused setup link" means t
 
 ### If you are the only administrator and cannot sign in
 
-**Forgot password** needs a mail server, and "ask another administrator" needs another
+**Forgot password** needs a mail server, and "another system administrator" needs a second
 administrator — so on a single-administrator install with no SMTP the two remedies this
 guide offers everywhere else are both empty, and the console that would fix it is behind
 the sign-in you cannot pass. The way out needs neither: **seed a second administrator.**
 
 Point `SEED_ADMIN_EMAIL` at an address that has **no account yet**, set
-`SEED_ADMIN_PASSWORD` to a password of your own, and restart the app. Seeding only ever
-*creates* — it never re-passwords an existing account, which is the same idempotence
-described under [First user](#first-user-the-administrator) — so the new address gets a
-fresh active system administrator while the locked-out account is left exactly as it is,
-with everything it owns.
+`SEED_ADMIN_PASSWORD` to a password of your own, and restart the app. Seeding never
+re-passwords an existing account, which is the same idempotence described under
+[First user](#first-user-the-administrator) — so the new address gets a fresh active
+system administrator while the locked-out account is left exactly as it is, with
+everything it owns.
+
+**"No account yet" is the whole of it.** Seeding does not only *create*. As [First
+user](#first-user-the-administrator) says, an address that **already** has an account is
+**promoted to system administrator** instead — so pointing `SEED_ADMIN_EMAIL` at a
+colleague's address, at a workspace member's, or at your own second one creates nothing,
+sets no password, leaves you exactly as locked out as you were, and hands that account
+system administration over every workspace on the instance. And the likeliest wrong
+address is the locked-out account itself, which is where the variable is probably already
+pointing — if the `SEED_ADMIN_*` pair is what the refusal named, it names that account
+today. That one is already an administrator, so it is not even promoted: the boot simply
+succeeds, nothing happens, and you are still locked out. Check before you restart — at the
+same database prompt you cleared the password from, this must return no rows:
+
+```sql
+SELECT id FROM users WHERE lower(email) = lower('<the address you are about to seed>');
+```
+
+The startup log says afterwards which of the three happened. `Admin account created from
+seed.admin.email (SEED_ADMIN_EMAIL)` is the one you want. `Admin seeding did nothing: …`
+means the address already belonged to a system administrator — very likely the locked-out
+one — and nothing changed. `Existing seed account promoted to system ADMIN …` means you
+pointed it at somebody's ordinary account and have just made them an administrator; undo
+that from **Users** once you are back in.
 
 Then sign in as the new administrator, open **Users** in `/admin`, and regenerate the
 locked-out account's setup link: it sets that account's password, and there is no mail

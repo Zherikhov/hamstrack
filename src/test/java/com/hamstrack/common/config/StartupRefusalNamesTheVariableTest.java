@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -307,9 +308,67 @@ class StartupRefusalNamesTheVariableTest {
         // The breaking characters are few and stable: an argument separator, a statement end, and a
         // block boundary. Everything else is an expression, and an expression between two literals
         // joined by `+` is part of the same message.
+        //
+        // ... but only an argument separator of THIS call (HD-342). A comma inside a nested call
+        // between two literals is not one, and reading it as one truncated a message at its third
+        // literal: `"...published in its " + "own .env.prod.example: " + String.join(", ", offenders)
+        // + ". This is read from the "` kept the head and dropped everything after `", "` - which is
+        // nearly the whole of DataSeeder.rejectPublishedAdminHash's refusal, invisible to every rule
+        // in this class while the separator argument of a String.join was read as the end of the
+        // message - this file's HD-342 rule found ONE locked-out refusal where the tree holds two,
+        // the missing one being exactly that.
+        //
+        // MEASURED on that message, in the scanner's own joined form (its literals plus the single
+        // space it joins them with), by a port of this scanner run over both trees: the old
+        // predicate kept a run of 114 characters - three literals, of which the head is 87 - out of
+        // the 1725 the message held before this ticket, and out of the 2965 it holds after it, which
+        // is what would be invisible now. (As raw literal text, without the joining spaces: 112 out
+        // of 1704, and 2929.) Note what did NOT move: the message COUNT is unchanged either way,
+        // because the dropped tail starts a run that no context claims, so it is not counted as a
+        // second message - a truncation here shrinks text, never a population, and no floor in this
+        // class can see it. The figure that stood here through round 1 - "2398 characters" - was
+        // none of those five numbers; it is quoted now only as the reason this comment says how
+        // each one was taken.
+        //
+        // WHICH COMMA SEPARATES THIS CALL'S ARGUMENTS is decided against the depth the gap ENDS at,
+        // because that is where the next literal sits. A comma breaks only if it is at or below that
+        // depth; a comma deeper than it belongs to a call the gap opens and closes on the way, which
+        // is inside the message, not around it. Three real shapes, all measured over the tree:
+        //   `, offenders) + `      ends at -1, its comma is at 0  -> deeper -> merge (String.join's)
+        //   ` + Map.of(a, b) + `   ends at  0, its commas at 1    -> deeper -> merge
+        //   ` + b, `               ends at  0, its comma  at 0    -> break (this call's separator)
+        // The earlier reading of this used the SHALLOWEST depth the gap reaches instead, and that is
+        // satisfied by a gap which closes one call and then opens two more: `@Query(... + CONST,
+        // nativeQuery = true) List<Object[]> openCounts(@Param(` reaches -1 at the `)`, so its
+        // `, nativeQuery` sat above the minimum and merged - pulling a @Param literal into a @Query
+        // string. Measured over all 578 production sources, 4673 gaps: ending-depth and
+        // shallowest-depth disagree on exactly one gap, that one, and ending-depth is never the
+        // laxer of the two. Both directions are tabled in
+        // theRunMergerTellsAnArgumentSeparatorFromACommaInsideANestedCall, including the gap that
+        // OPENS a nested call (` + String.join(`) - a rule phrased as "may not leave a paren open"
+        // passes the @Query case and re-truncates that one, which is why it is not the rule here.
+        // Planted and watched: with that rule in place the table reds on ` + String.join(` AND the
+        // HD-342 lockout arm reds on its own floor, because the truncation it causes drops the
+        // `UPDATE users SET password_hash = NULL` out of the second refusal and leaves one member.
+        int endDepth = 0;
         for (int i = 0; i < gap.length(); i++) {
             char c = gap.charAt(i);
-            if (c == ',' || c == ';' || c == '{' || c == '}') {
+            if (c == '(') {
+                endDepth++;
+            } else if (c == ')') {
+                endDepth--;
+            } else if (c == ';' || c == '{' || c == '}') {
+                return false;
+            }
+        }
+        int depth = 0;
+        for (int i = 0; i < gap.length(); i++) {
+            char c = gap.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            } else if (c == ',' && depth <= endDepth) {
                 return false;
             }
         }
@@ -588,6 +647,406 @@ class StartupRefusalNamesTheVariableTest {
                         this scanner reads those most reliably - and the `{}` arguments stay for the
                         values that vary.""", String.join("\n", audit.offences()))
                 .isEmpty();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // HD-342 - the third rule over the same scanner: a refusal that locks its reader out owes
+    // them a way back in that they can actually walk.
+    // ---------------------------------------------------------------------------------------
+
+    /** The operator manual. Read as text; the one thing taken from it is a section, not a phrase. */
+    private static final Path SELF_HOSTING_GUIDE = Path.of("docs", "self-hosting.md");
+
+    /**
+     * The GitHub anchor of the section that documents the route back in for a reader who has
+     * <em>neither</em> of the remedies this product otherwise offers. It is the one literal in this
+     * rule, and it is deliberately the SUBJECT of the rule rather than its population: the ticket
+     * asks for the population to be derived, and naming the single documented remedy is the point.
+     * It is not a dangling promise either - {@link #recoverySection()} resolves it against the real
+     * headings of {@link #SELF_HOSTING_GUIDE} and fails naming the file when it stops resolving, and
+     * the heading TEXT a refusal must quote is read out of that file rather than written here, so
+     * renaming the section reds this rule instead of silently detaching the refusals from it.
+     */
+    private static final String RECOVERY_ANCHOR = "if-you-are-the-only-administrator-and-cannot-sign-in";
+
+    /** The field of {@code User} that holds the credential; its COLUMN name is read from the mapping. */
+    private static final String CREDENTIAL_FIELD = "passwordHash";
+
+    /** A heading line of a markdown document. */
+    private static final Pattern MARKDOWN_HEADING = Pattern.compile("^(#{1,6})\\s+(.+?)\\s*$");
+
+    /**
+     * {@code **Forgot password** needs a mail server} / {@code "ask another administrator" needs
+     * another administrator} - the guide's own shape for "here is a remedy, and here is what it
+     * requires". The emphasis or the quotes delimit the remedy's name; {@code needs} is the verb the
+     * section is built on.
+     */
+    private static final Pattern PRECONDITIONED_REMEDY =
+            Pattern.compile("(?:\\*\\*|\")([A-Za-z][^*\"\\n]{2,60}?)(?:\\*\\*|\")\\s+needs\\b");
+
+    /** A heading, and the body that runs to the next heading of the same or a higher level. */
+    private record Section(String heading, String body) { }
+
+    /** How a member came to be one. Printed on every run, so neither arm can collapse unseen. */
+    private record LockedOutRefusal(Message message, List<String> why) { }
+
+    /**
+     * <strong>HD-342 &mdash; a refusal that takes a credential away names a route back in that its
+     * reader can walk.</strong>
+     *
+     * <h2>The claim being sealed</h2>
+     * {@code DataSeeder}'s two boot refusals hand the operator
+     * {@code UPDATE users SET password_hash = NULL}, and then prescribed exactly three ways to set a
+     * new one: <em>Forgot password</em>, <em>another system administrator</em>, and <em>delete the
+     * account</em> in the admin console. For the reader these messages exist for &mdash; a
+     * self-hoster with one administrator and no mail server &mdash; all three are empty: the first
+     * needs SMTP, the second needs a second human, and the third sits behind the sign-in the SQL
+     * statement has just taken away. The refusal created the lockout and then described only exits
+     * that are shut. That is §8.2 of {@code docs/design/published-credentials-proposal.md} &mdash;
+     * <em>a refusal may only prescribe an action its reader can perform</em> &mdash; broken by the
+     * two messages that section is about.
+     *
+     * <h2>Why the population is derived from the CAUSE and not from the symptom</h2>
+     * The obvious scan is for {@code Forgot password}, and it is the wrong one: it defines the
+     * population by the words of today's defect, so the same mistake written tomorrow in different
+     * words is not a member and the seal reports the same green. So the members are derived twice,
+     * and the union is the population:
+     * <ul>
+     *   <li><strong>The lockout arm (causal).</strong> A refusal whose own remedy is a write against
+     *       the credential store &mdash; {@code UPDATE <users> SET … <password_hash> …} or
+     *       {@code DELETE FROM <users>} &mdash; where <em>both</em> names are read off the
+     *       {@code User} entity's JPA mapping ({@link #credentialStore()}) rather than written here,
+     *       so a renamed table or column follows the entity. This arm cannot be escaped by rewording
+     *       the remedies, because it keys on the instruction that <em>creates</em> the lockout.</li>
+     *   <li><strong>The precondition arm (complementary).</strong> A refusal that names a remedy the
+     *       manual itself declares empty for this reader. Those names are not listed here either:
+     *       they are extracted from the recovery section's own {@code "<remedy>" needs <thing>}
+     *       sentences ({@link #PRECONDITIONED_REMEDY}), so the day a fourth preconditioned remedy is
+     *       written into the guide, every refusal offering it becomes a member with no edit here.
+     *       This arm catches the shape the first one misses: a refusal that prescribes a conditioned
+     *       route without handing over any SQL. It extracts two remedies today and <em>both</em>
+     *       match &mdash; which was not free: the guide used to write the second as <em>"ask
+     *       another administrator"</em>, a phrase no message in this repository contains, so the
+     *       arm ran on one token while printing a list of two. The guide now quotes the refusals'
+     *       own words (<em>"another system administrator"</em>). The run always prints the
+     *       extracted set and the reason each member matched, so a silent return to one token is
+     *       visible in the output rather than inferable from the floor.</li>
+     * </ul>
+     * Each arm is floored separately. An arm that silently empties would otherwise be carried by its
+     * sibling's members and look alive - which is the failure this class already carries one scar
+     * from, in the {@code @Value} mapping whose floor had to be moved rather than lowered.
+     *
+     * <h2>The unit, and the control on it</h2>
+     * The unit is the refusal <strong>site</strong> ({@code file:line}), and the check asks its
+     * question of that same site's own text. The control that the unit is not the FILE is below: one
+     * file must carry two member sites, or a per-file reading of this rule would be
+     * indistinguishable from a per-site one on a green run &mdash; the HD-306 shape.
+     *
+     * <h2>What is held mechanically, and what is prose</h2>
+     * Held: the member points at {@link #SELF_HOSTING_GUIDE} <em>and</em> quotes the heading of the
+     * section that documents the route needing neither. The sentence each refusal writes in line
+     * (<em>point {@code SEED_ADMIN_EMAIL} at an address with no account and restart</em>) is pinned
+     * instance-wise by {@code SeedGuardStartupOrderingTest} and {@code SeedAdminPasswordValidationTest};
+     * it cannot be held here, because every one of these messages already names
+     * {@code SEED_ADMIN_EMAIL} for an unrelated reason, so a check for it would be satisfied by the
+     * defect and could never fire.
+     *
+     * <h2>Boundaries</h2>
+     * Only fail-fast refusals &mdash; {@code Illegal(State|Argument)Exception} and bean-validation
+     * messages &mdash; are in scope, which is what {@link Kind#REFUSAL} already means here. An
+     * {@code AppException} answering a request is not a boot refusal and its reader has a running
+     * application; {@code SelfHeldRoleException} offers a remedy of just that wording and is
+     * outside this population because of what it <em>is</em>, not by an exclusion.
+     */
+    @Test
+    void everyRefusalThatTakesACredentialAwayNamesARouteBackInItsReaderCanWalk() {
+        List<Message> refusals = messagesOfKind(Kind.REFUSAL);
+        assertThat(refusals)
+                .withFailMessage("""
+                        NO REFUSAL MESSAGE WAS FOUND under %s, so this rule is checking nothing. A
+                        refusal is a run of string literals thrown as IllegalStateException /
+                        IllegalArgumentException, or given as a bean-validation `message = `. If the
+                        fail-fast sites moved or changed shape, point this test at them.""", JAVA_ROOT)
+                .hasSizeGreaterThanOrEqualTo(55);
+
+        String[] store = credentialStore();
+        Pattern credentialWrite = Pattern.compile(
+                "(?i)\\b(?:UPDATE\\s+" + Pattern.quote(store[0]) + "\\s+SET\\b[^;]{0,200}?\\b"
+                + Pattern.quote(store[1]) + "\\b|DELETE\\s+FROM\\s+" + Pattern.quote(store[0]) + "\\b)");
+
+        Section recovery = recoverySection();
+        List<String> preconditioned = preconditionedRemedies(recovery);
+
+        var members = new ArrayList<LockedOutRefusal>();
+        var lockoutArm = 0;
+        var preconditionArm = 0;
+        for (Message refusal : refusals) {
+            String text = normalise(refusal.text());
+            var why = new ArrayList<String>();
+            if (credentialWrite.matcher(text).find()) {
+                why.add("hands over a write against " + store[0] + "." + store[1]);
+            }
+            for (String remedy : preconditioned) {
+                if (containsIgnoringCase(text, remedy)) {
+                    why.add("prescribes \"" + remedy + "\", which the guide declares empty here");
+                }
+            }
+            if (why.isEmpty()) {
+                continue;
+            }
+            lockoutArm += why.getFirst().startsWith("hands over") ? 1 : 0;
+            preconditionArm += why.stream().anyMatch(w -> w.startsWith("prescribes")) ? 1 : 0;
+            members.add(new LockedOutRefusal(refusal, why));
+        }
+
+        System.out.println("[HD-342] recovery section: \"" + recovery.heading() + "\" (#" + RECOVERY_ANCHOR
+                           + ", " + recovery.body().length() + " chars of body)");
+        System.out.println("[HD-342] remedies the guide declares empty for this reader: " + preconditioned);
+        System.out.println("[HD-342] credential store derived from the User entity: "
+                           + store[0] + "." + store[1]);
+        System.out.println("[HD-342] " + members.size() + " refusal(s) lock their reader out ("
+                           + lockoutArm + " via the credential write, " + preconditionArm
+                           + " via a preconditioned remedy):");
+        members.forEach(member -> System.out.println(
+                "[HD-342]   " + member.message().site() + " - " + String.join("; ", member.why())));
+
+        // Each arm names the count it actually measured and the sites behind it. "Found none" was
+        // the wording here until the tests gate watched this red: under the truncating run merger
+        // the lockout arm sees ONE of the two, and a message asserting zero sends its reader
+        // looking for a disappearance that did not happen - the arm did not empty, it SHRANK, and
+        // the member that vanished is the evidence of which defect did it.
+        List<LockedOutRefusal> byCredentialWrite = members.stream()
+                .filter(m -> m.why().getFirst().startsWith("hands over")).toList();
+        List<LockedOutRefusal> byPrecondition = members.stream()
+                .filter(m -> m.why().stream().anyMatch(w -> w.startsWith("prescribes"))).toList();
+
+        assertThat(byCredentialWrite)
+                .withFailMessage("""
+                        THE LOCKOUT ARM IS BELOW ITS FLOOR OF 2: it sees %d (%s), so the causal half of
+                        this population has shrunk - which is how an arm goes on looking alive over less
+                        than it used to cover. It looks for a write against `%s.%s`, both names read off
+                        the User entity's JPA mapping.
+
+                        Three causes, in the order they have really happened here. (1) The run merger
+                        truncated a refusal before its SQL, so the arm cannot see text that is still
+                        there - check theRunMergerTellsAnArgumentSeparatorFromACommaInsideANestedCall in
+                        this class first; it is the same defect and reds beside this one. (2) The
+                        refusals stopped prescribing SQL - good, then re-point this arm at whatever
+                        repair they prescribe now. (3) The entity's mapping moved and these names no
+                        longer appear in any message. Do not lower this floor.""",
+                        byCredentialWrite.size(),
+                        byCredentialWrite.stream().map(m -> m.message().site()).toList(),
+                        store[0], store[1])
+                .hasSizeGreaterThanOrEqualTo(2);
+
+        assertThat(byPrecondition)
+                .withFailMessage("""
+                        THE PRECONDITION ARM IS BELOW ITS FLOOR OF 2: it sees %d (%s), so the half of
+                        this population that can see a conditioned remedy offered WITHOUT any SQL has
+                        shrunk, and a refusal of that shape is becoming invisible here. It looks for %s
+                        - extracted from "%s" in %s, never listed in this test.
+
+                        Either no refusal names one any more (then this rule has nothing to protect and
+                        the arm should be re-pointed, not deleted), or the guide stopped writing them as
+                        `"<remedy>" needs <thing>` and the extraction found the wrong set, or the run
+                        merger truncated a refusal before the remedy it names.""",
+                        byPrecondition.size(),
+                        byPrecondition.stream().map(m -> m.message().site()).toList(),
+                        preconditioned, recovery.heading(), SELF_HOSTING_GUIDE)
+                .hasSizeGreaterThanOrEqualTo(2);
+
+        // Granularity control: the unit is the SITE, not the FILE. Two members in one file is what
+        // makes the two readings distinguishable on a green run; DataSeeder carried both when this
+        // was written. If they move apart, re-point this at whichever file now carries two.
+        Map<String, Long> perFile = members.stream().collect(Collectors.groupingBy(
+                member -> member.message().file(), TreeMap::new, Collectors.counting()));
+        assertThat(perFile.values())
+                .withFailMessage("""
+                        NO FILE CARRIES TWO LOCKED-OUT REFUSALS ANY MORE (%s), so this rule can no longer
+                        tell whether its unit is the refusal SITE or the file - the two agree on every
+                        one-member file, and that agreement is what hid an HD-306 defect inside a green
+                        category test. Re-point this control at whichever file now carries two; do not
+                        delete it.""", perFile)
+                .anyMatch(count -> count >= 2);
+
+        String guide = SELF_HOSTING_GUIDE.toString().replace('\\', '/');
+        String heading = normalise(recovery.heading());
+        List<String> offences = members.stream()
+                .filter(member -> {
+                    String text = normalise(member.message().text());
+                    return !(text.contains(guide) && text.contains(heading));
+                })
+                .map(member -> "  " + member.message().site() + " - " + String.join("; ", member.why())
+                               + (normalise(member.message().text()).contains(guide)
+                                       ? "; it does point at " + guide + ", but not at this section"
+                                       : "; it names no documentation at all"))
+                .toList();
+
+        assertThat(offences)
+                .withFailMessage("""
+                        A REFUSAL LOCKS ITS READER OUT AND PRESCRIBES NO ROUTE BACK IN THAT THEY CAN WALK.
+
+                        Forgot password needs a mail server. "Another system administrator" needs a second
+                        one. The admin console is behind the sign-in this refusal has just taken away. A
+                        self-hoster with one administrator and no SMTP has none of the three, and a
+                        refusal that offers only those has told them to break their instance and stop.
+
+                        %s
+
+                        Each of these must also name the route that needs neither - seed a second
+                        administrator at an address with no account, restart - and point the reader at
+                        `%s`, the section titled:
+
+                          "%s"
+
+                        Quote that heading verbatim: this test reads it out of the guide, so the
+                        pointer stays live when the section is renamed.""",
+                        String.join("\n", offences), guide, recovery.heading())
+                .isEmpty();
+    }
+
+    /**
+     * The table and column that hold a credential, read off {@code User}'s JPA mapping rather than
+     * written down - so the lockout arm follows a rename instead of quietly matching nothing. A
+     * reflective reader that cannot tell "absent" from "not applicable" is the trap here, so every
+     * step fails loudly: a missing annotation, a missing field and an empty {@code name()} are each
+     * refused by name rather than returned as a blank that matches nothing.
+     *
+     * @return {@code {table, column}}
+     */
+    private static String[] credentialStore() {
+        var table = com.hamstrack.auth.entity.User.class.getAnnotation(jakarta.persistence.Table.class);
+        assertThat(table)
+                .withFailMessage("""
+                        The User entity carries no @Table, so this rule cannot derive the name of the
+                        credential store and its lockout arm would match nothing while staying green.
+                        Point credentialStore() at wherever the mapping lives now.""")
+                .isNotNull();
+        String column;
+        try {
+            var field = com.hamstrack.auth.entity.User.class.getDeclaredField(CREDENTIAL_FIELD);
+            var mapping = field.getAnnotation(jakarta.persistence.Column.class);
+            column = mapping == null ? "" : mapping.name();
+        } catch (NoSuchFieldException e) {
+            column = "";
+        }
+        assertThat(table.name()).isNotBlank();
+        assertThat(column)
+                .withFailMessage("""
+                        User.%s is gone, or carries no @Column(name = "..."), so this rule cannot derive
+                        the credential column and its lockout arm would match nothing while staying
+                        green. Name the field this rule should follow; do not let it fall back to a
+                        blank, which matches every message and none.""", CREDENTIAL_FIELD)
+                .isNotBlank();
+        return new String[] {table.name(), column};
+    }
+
+    /**
+     * The section of the operator manual that documents the route needing neither a mail server nor
+     * a colleague, found by resolving {@link #RECOVERY_ANCHOR} against the document's real headings.
+     * A GitHub anchor is the heading lower-cased with everything but letters, digits, spaces and
+     * hyphens removed and spaces turned into hyphens; computing it here rather than storing the
+     * heading text is what lets a refusal be checked against the heading as it reads TODAY.
+     */
+    private static Section recoverySection() {
+        Path path = REPO_ROOT.resolve(SELF_HOSTING_GUIDE);
+        List<String> lines;
+        try {
+            lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        String heading = null;
+        int level = 0;
+        var body = new StringBuilder();
+        for (String line : lines) {
+            Matcher m = MARKDOWN_HEADING.matcher(line);
+            if (m.matches()) {
+                if (heading != null && m.group(1).length() <= level) {
+                    break;
+                }
+                if (heading == null && anchorOf(m.group(2)).equals(RECOVERY_ANCHOR)) {
+                    heading = m.group(2);
+                    level = m.group(1).length();
+                    continue;
+                }
+            }
+            if (heading != null) {
+                body.append(line).append('\n');
+            }
+        }
+        assertThat(heading)
+                .withFailMessage("""
+                        NO SECTION OF %s HAS THE ANCHOR `#%s`, so the one route a locked-out sole
+                        administrator can walk is not documented under the name every refusal in this
+                        repository points at - and this rule would have nothing to hold them to.
+
+                        If the section was renamed, update this anchor AND the refusals that quote the
+                        old heading (they are listed by the main assertion here). If it was deleted, the
+                        remedy it described is gone and those refusals prescribe nothing performable
+                        again.""", path.toAbsolutePath().normalize(), RECOVERY_ANCHOR)
+                .isNotNull();
+        assertThat(body.toString())
+                .withFailMessage("""
+                        The section `#%s` of %s is (near) empty, so the refusals pointing at it send
+                        their reader to a heading with no remedy under it. Restore the walk-through, or
+                        re-point this rule at wherever it moved.""", RECOVERY_ANCHOR, SELF_HOSTING_GUIDE)
+                .hasSizeGreaterThan(500);
+        return new Section(heading, body.toString());
+    }
+
+    /**
+     * The remedies the recovery section itself declares unavailable to its reader, read out of its
+     * own {@code **Forgot password** needs a mail server} sentences. Derived rather than listed on
+     * purpose: a list here would be a list of today's symptom, and a fourth conditioned remedy
+     * written into the guide tomorrow has to enlarge this population without an edit in this file.
+     */
+    private static List<String> preconditionedRemedies(Section recovery) {
+        var remedies = new LinkedHashSet<String>();
+        Matcher m = PRECONDITIONED_REMEDY.matcher(normalise(recovery.body()));
+        while (m.find()) {
+            remedies.add(m.group(1).strip());
+        }
+        assertThat(remedies)
+                .withFailMessage("""
+                        FEWER THAN TWO PRECONDITIONED REMEDIES WERE EXTRACTED from "%s" in %s (found:
+                        %s), so the precondition arm of this rule's population is derived from almost
+                        nothing and the arm's own floor below would be satisfied by luck.
+
+                        That section exists to say which remedies are EMPTY for a sole administrator
+                        with no mail server, and it says it as `**Forgot password** needs a mail server`.
+                        If the wording changed, teach PRECONDITIONED_REMEDY the new shape - do not write
+                        the remedies into this test, which would peg the population to today's symptom.""",
+                        recovery.heading(), SELF_HOSTING_GUIDE, remedies)
+                .hasSizeGreaterThanOrEqualTo(2);
+        return List.copyOf(remedies);
+    }
+
+    /** The GitHub heading anchor: lower-cased, punctuation dropped, spaces hyphenated. */
+    private static String anchorOf(String heading) {
+        var slug = new StringBuilder();
+        for (char c : heading.toLowerCase(Locale.ROOT).toCharArray()) {
+            if (Character.isLetterOrDigit(c) || c == '-') {
+                slug.append(c);
+            } else if (c == ' ') {
+                slug.append('-');
+            }
+        }
+        return slug.toString();
+    }
+
+    /**
+     * Every run of whitespace to one space. The scanner joins concatenated literals with a space of
+     * its own, so a sentence written across two literals reads back with a double space and a naive
+     * {@code contains} of the heading would miss it - a check that cannot fire, which is worse than
+     * one that fires wrongly.
+     */
+    private static String normalise(String text) {
+        return text.replaceAll("\\s+", " ").strip();
+    }
+
+    private static boolean containsIgnoringCase(String haystack, String needle) {
+        return haystack.toLowerCase(Locale.ROOT).contains(needle.toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -875,6 +1334,75 @@ class StartupRefusalNamesTheVariableTest {
                         %s""", logLines)
                 .doesNotContain("app.sample.comment")
                 .doesNotContain("app.sample.plain");
+    }
+
+    /**
+     * <strong>The run merger, in both directions</strong> (HD-342). {@link #isConcatenation} decides
+     * where one message ends, so it governs the text every rule in this class reads. Both of its
+     * mistakes are silent: merging too much pulls a neighbouring argument into a message (false
+     * accusations), merging too little truncates one (a message that cannot be checked while looking
+     * checked &mdash; which is what it did, dropping all but the first 114 characters of
+     * {@code DataSeeder.rejectPublishedAdminHash} at a {@code String.join(", ", …)}).
+     *
+     * <p>So the table has a floor on each direction rather than only on the forms it must see. The
+     * cases are written as the GAP between two literals, which is the only thing that function is
+     * ever given.
+     *
+     * <p>Every entry below is a shape the tree actually writes, and three of them are here because
+     * a plausible rule gets exactly them wrong. {@code , offenders) + } and
+     * {@code + Map.of(a, b).get(k) + } break under "any comma ends the message", which is what
+     * truncated the refusal. {@code + String.join(} breaks under "a gap may not leave a paren
+     * open", which is the obvious repair for the {@code @Query}/{@code @Param} over-merge below and
+     * re-truncates the same refusal in the same stroke. The {@code @Query} gap itself merges under
+     * "a comma at the shallowest depth the gap reaches", because that gap closes one call and then
+     * opens two more.
+     */
+    @Test
+    void theRunMergerTellsAnArgumentSeparatorFromACommaInsideANestedCall() {
+        // Gaps that keep one message together.
+        List<String> mustMerge = List.of(
+                " + ",
+                " + appProperties.baseUrl() + ",
+                " + (MARGIN * lockMs) + ",
+                " + String.join(\", \", offenders) + ",   // the HD-342 case: ...join(" + here
+                " + String.join(",                        // ... as the tree really writes it: the
+                                                          //     gap that OPENS the nested call
+                ", offenders) + ",                        // ... and the gap that follows its separator
+                " + Map.of(a, b).get(k) + ");
+        // Gaps that end one message: an argument separator of the enclosing call, a statement end,
+        // a block boundary.
+        List<String> mustBreak = List.of(
+                " + b, ",                                 // separator of the enclosing call
+                ", bar(x) + ",                            // separator, then a nested call
+                " + x; log.info(",                        // statement end
+                " -> { return a + ",                      // block boundary
+                ", ",                                     // the bare separator
+                // AgingReportRepository.openCounts: closes @Query, then opens the method and
+                // @Param. Its `, nativeQuery` is this annotation's separator, and merging it pulls
+                // the @Param literal into the query text.
+                " + PROJECT_SCOPED_OPEN_ISSUES, nativeQuery = true) List<Object[]> openCounts(@Param(");
+
+        var mergedWrongly = mustBreak.stream().filter(StartupRefusalNamesTheVariableTest::isConcatenation).toList();
+        var brokenWrongly = mustMerge.stream().filter(gap -> !isConcatenation(gap)).toList();
+
+        assertThat(brokenWrongly)
+                .withFailMessage("""
+                        THE RUN MERGER TRUNCATES A MESSAGE at one of the gaps this codebase writes, so
+                        everything after that point is invisible to every rule in this class while the
+                        surviving head is still audited and still passes. Gaps wrongly read as the end
+                        of a message: %s""", brokenWrongly)
+                .isEmpty();
+        assertThat(mergedWrongly)
+                .withFailMessage("""
+                        THE RUN MERGER SWALLOWS A NEIGHBOURING ARGUMENT, so text that is not part of a
+                        message is audited as if it were and this class produces false accusations
+                        against messages that already say the right thing. Gaps wrongly read as part of
+                        one message: %s""", mergedWrongly)
+                .isEmpty();
+
+        // Floors on BOTH directions: a table that lost one half would go on looking table-driven.
+        assertThat(mustMerge).hasSizeGreaterThanOrEqualTo(6);
+        assertThat(mustBreak).hasSizeGreaterThanOrEqualTo(5);
     }
 
     /** {@code throw new IllegalStateException(String.format(} &mdash; a template, not a message. */

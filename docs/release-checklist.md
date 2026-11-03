@@ -1568,13 +1568,18 @@ sole-administrator account, which has no administrator above it — the guide no
 the remedy that needs no mail server and no colleague (seed a second administrator;
 measured the same day, see that section).
 
-**Left outstanding, deliberately, because it is production code and not a document:**
-`DataSeeder`'s two boot refusals still prescribe only "Forgot password" or "another
-system administrator" (`DataSeeder.java:353`, `:495`), neither of which a sole
+**That was left outstanding at the time, because it is production code and not a
+document, and it is closed now (HD-342):** `DataSeeder`'s two boot refusals prescribed
+only "Forgot password" or "another system administrator", neither of which a sole
 administrator with no mail server has — the §8.2 rule in
 `docs/design/published-credentials-proposal.md` ("a refusal may only prescribe an
-action its reader can perform") outstanding against the very messages that section
-is about.
+action its reader can perform") broken by the very messages that section is about.
+Both now also prescribe seeding a second administrator and point at the guide section
+that walks it through, and the rule is held by a derived population rather than by
+this paragraph (see §8.2, which names the seal). Worth keeping as a worked example of
+the asymmetry: the *guide* had carried the performable remedy since the release before,
+in three places, while the *code* that produces the refusal had it in none — a document
+is edited by whoever reads it, and a message is edited by whoever is sent to it.
 
 **6. The JAR on the Release is the JAR inside the image of the same tag.** HD-321 added
 two assets per release — `hamstrack-X.Y.Z.jar` and `hamstrack-X.Y.Z.jar.sha256` — and

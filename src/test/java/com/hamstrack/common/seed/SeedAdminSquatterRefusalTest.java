@@ -4,6 +4,8 @@ import com.hamstrack.HamstrackApplication;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.context.event.ApplicationStartedEvent;
+import org.springframework.context.ApplicationListener;
 import org.springframework.context.ConfigurableApplicationContext;
 
 import java.sql.Connection;
@@ -168,6 +170,19 @@ class SeedAdminSquatterRefusalTest {
      * <p>The promotion itself is the older behaviour this ticket had to preserve: accounts seeded
      * before system roles existed must still get {@code ADMIN}, so a seeder that refused
      * everything it found would break every upgrade.
+     *
+     * <p><strong>And since HD-342 this is also the behavioural half of a sentence two boot
+     * refusals print.</strong> Those messages send a locked-out sole administrator to seed a
+     * second one, and the instruction they hang it on is "an address with NO account". The
+     * instruction is only worth printing because of what this test measures: an address that
+     * already has one is <em>promoted</em>, not duplicated, and {@code seed.admin.password} is
+     * never applied to it. So the planted row's {@code password_hash} — {@code NULL}, which is
+     * exactly the shape the refusals' own {@code UPDATE users SET password_hash = NULL} leaves —
+     * is asserted to be {@code NULL} still. Without that leg the operator-facing consequence
+     * ("nothing is created, no password is set, you are still locked out, and that account now
+     * administers the instance") rests on the two seed tests that only assert the <em>string</em>
+     * is present. The third leg of the same sentence, the {@code ADMIN} grant to whoever owns the
+     * address, is the first assertion below read the other way round.
      */
     @Test
     void anExactlyMatchingRowIsPromotedEvenFromAMixedCaseConfiguration() throws Exception {
@@ -191,6 +206,73 @@ class SeedAdminSquatterRefusalTest {
         assertThat(rowsFolding(address))
                 .as("and no second administrator was minted beside it")
                 .isEqualTo(1);
+        assertThat(passwordHashOf(existing))
+                .as("""
+                        AND NO PASSWORD WAS SET ON IT (HD-342). This row went in with a NULL \
+                        password_hash - the shape the two boot refusals' own `UPDATE users SET \
+                        password_hash = NULL` leaves behind - and seed.admin.password was set on \
+                        this boot. An operator who is locked out and points SEED_ADMIN_EMAIL at \
+                        their own account gets a clean boot that creates nothing, sets nothing, \
+                        and leaves them exactly as locked out as before, while granting ADMIN to \
+                        whoever owns the address. That is why those refusals say the address must \
+                        have NO account, and this assertion is why they may say it. If seeding \
+                        ever starts re-passwording a found row, every one of those sentences is \
+                        false and they are the ones to fix, not this line.""")
+                .isNull();
+    }
+
+    /**
+     * <strong>HD-342 — the third terminal path for a configured address used to end in total
+     * silence, and it is the one the recovery route's likeliest wrong turn lands on.</strong>
+     *
+     * <p>{@link #anExactlyMatchingRowIsPromotedEvenFromAMixedCaseConfiguration} above covers the
+     * row that is not yet {@code ADMIN}: it is promoted, and the promotion logs. This case is the
+     * row that <em>already</em> is one — and the boot refusals that now send a locked-out sole
+     * administrator to seed a second one make it reachable on purpose, because the account they
+     * are locked out of is a system administrator and {@code SEED_ADMIN_EMAIL} is very likely
+     * still pointing at it: on an unedited template, that pair being set is what printed the
+     * refusal in the first place.
+     *
+     * <p>So the operator sets a new {@code SEED_ADMIN_PASSWORD}, restarts, and the boot
+     * <em>succeeds</em>. Nothing is created, nothing is re-passworded, they still cannot sign in,
+     * and before this line the log said nothing whatsoever — leaving them unable to tell "it
+     * worked and I am wrong about something else" from "it did nothing". The line is the witness
+     * this project requires of any path that skips, and the assertion below is it having been seen
+     * to fire rather than reasoned about.
+     *
+     * <p>Addressless, like every other line this class logs, and the assertion says so: an address
+     * in a shipped log is what {@code logServerErrorDetail=false} spent a release removing.
+     */
+    @Test
+    void anAlreadyAdminRowIsLeftAloneAndSaysSoInTheLog() throws Exception {
+        var address = address("seed-already-admin");
+        var existing = plant(address);
+        promoteDirectly(existing);
+
+        List<String> logged = captureSeederLog(address);
+
+        assertThat(logged)
+                .as("""
+                        THIS BRANCH MUST NOT BE SILENT. It is the terminal path an operator \
+                        following the boot refusals' recovery route lands on when they leave \
+                        SEED_ADMIN_EMAIL pointing at the administrator they are locked out of - \
+                        the boot succeeds, nothing is created, no password is set, and without a \
+                        line here the route this product prescribes reads as broken. Say that \
+                        nothing was created, that NO PASSWORD WAS SET, and what an actual recovery \
+                        needs: an address with no account.""")
+                .anySatisfy(line -> assertThat(line)
+                        .contains("Admin seeding did nothing")
+                        .contains("NO PASSWORD WAS SET")
+                        .contains("SEED_ADMIN_EMAIL")
+                        .contains("If you are the only administrator and cannot sign in"));
+        assertThat(logged)
+                .as("and no address in it - the reader is at their own console and knows which "
+                    + "address they configured; a third party's is not this project's to print")
+                .noneMatch(line -> line.contains(address));
+        assertThat(systemRoleOf(existing)).isEqualTo("ADMIN");
+        assertThat(passwordHashOf(existing))
+                .as("nothing was written to the row at all, which is the fact the line reports")
+                .isNull();
     }
 
     // ================================================================ the vehicle
@@ -257,6 +339,58 @@ class SeedAdminSquatterRefusalTest {
 
     private String emailOf(UUID id) throws SQLException {
         return scalar("SELECT email FROM users WHERE id = '" + id + "'");
+    }
+
+    /** {@code null} when the column is NULL &mdash; which is what a cleared password looks like. */
+    private String passwordHashOf(UUID id) throws SQLException {
+        return scalar("SELECT password_hash FROM users WHERE id = '" + id + "'");
+    }
+
+    /** Puts the planted row on the already-{@code ADMIN} branch without going through the seeder. */
+    private void promoteDirectly(UUID id) throws SQLException {
+        try (var conn = DriverManager.getConnection(URL, USER, PASSWORD)) {
+            exec(conn, "UPDATE users SET system_role = 'ADMIN' WHERE id = '" + id + "'");
+        }
+    }
+
+    /**
+     * Every line {@code DataSeeder} logs while it seeds {@code email}. A logback appender on that
+     * one logger, because the claim is "this branch is not silent" and the only honest way to hold
+     * it is to read what the branch actually emitted.
+     *
+     * <p><strong>Attached on {@code ApplicationStartedEvent}, not before the boot</strong> —
+     * measured, after the obvious version captured nothing: Boot's {@code LoggingApplicationListener}
+     * initialises the logging system during the refresh and <em>resets</em> the logback context,
+     * which detaches any appender added beforehand. {@code ApplicationStartedEvent} is published
+     * after the refresh and before {@code callRunners}, so it is the one window in which an
+     * appender both survives and precedes {@link DataSeeder}.
+     */
+    private List<String> captureSeederLog(String email) {
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        try {
+            close(new SpringApplicationBuilder(HamstrackApplication.class)
+                    .web(org.springframework.boot.WebApplicationType.NONE)
+                    .bannerMode(org.springframework.boot.Banner.Mode.OFF)
+                    .listeners((ApplicationListener<ApplicationStartedEvent>) event -> {
+                        var target = (ch.qos.logback.classic.Logger)
+                                org.slf4j.LoggerFactory.getLogger(DataSeeder.class);
+                        appender.start();
+                        target.addAppender(appender);
+                    })
+                    .properties(
+                            "seed.admin.email=" + email,
+                            "seed.admin.password=" + SEED_PASSWORD,
+                            "app.demo.seed-on-first-login=false",
+                            "app.rate-limit.enabled=false",
+                            "spring.docker.compose.enabled=false")
+                    .run());
+        } finally {
+            ((ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(DataSeeder.class))
+                    .detachAppender(appender);
+            appender.stop();
+        }
+        return appender.list.stream()
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage).toList();
     }
 
     private long rowsFolding(String email) throws SQLException {

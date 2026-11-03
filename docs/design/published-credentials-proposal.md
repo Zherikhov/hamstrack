@@ -409,10 +409,17 @@ complete enough to paste, with the account's own address in it, and it is assert
   cleared the password of the only account that could reach the console. The remedy that
   needs neither is seeding a second administrator (`SEED_ADMIN_EMAIL` at an address with no
   account, restart), written up in `docs/self-hosting.md`, "If you are the only
-  administrator and cannot sign in". **The refusal messages this section is about still
-  prescribe only the first three** (`DataSeeder.rejectPublishedPassword`,
-  `DataSeeder.rejectPublishedAdminHash`), which is this same §8.2 rule outstanding against
-  them (HD-320);
+  administrator and cannot sign in". **Both refusal messages now prescribe it**
+  (`DataSeeder.rejectPublishedPassword`, `DataSeeder.rejectPublishedAdminHash`) and both
+  point at that section by name, so this §8.2 rule is no longer outstanding against the
+  messages §8.2 is about (filed HD-320, closed HD-342). It is held rather than remembered:
+  `StartupRefusalNamesTheVariableTest#everyRefusalThatTakesACredentialAwayNamesARouteBackInItsReaderCanWalk`
+  derives its population from the **cause** — a refusal whose own remedy writes against the
+  credential store, with the table and column read off the `User` entity's mapping — unioned
+  with the refusals naming a remedy the guide itself declares empty here, so a refusal
+  written tomorrow is a member without an edit to the test. Grepping for *Forgot password*
+  was the alternative and was rejected: it defines the population by the wording of the
+  defect, and goes green the moment the same mistake is written in other words;
 - and treat it as a compromise rather than a misconfiguration — the account has carried the
   published password for as long as it has existed, and every release before the one printing the
   refusal served requests with it active, so "*if* the instance was ever reachable with that

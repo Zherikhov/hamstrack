@@ -363,6 +363,21 @@ public class DataSeeder implements ApplicationRunner {
                 + "everything the account owns and only takes its password away. Then start up and set a new "
                 + "one from 'Forgot password' on that address, or from another system administrator, Admin "
                 + "console → Users → reset it; or delete the account there if it should never have existed. "
+                + "IF YOU ARE THE ONLY ADMINISTRATOR AND HAVE NO MAIL SERVER, all three of those are empty — "
+                + "there is nobody to ask, and the console is behind the sign-in the statement above has just "
+                + "taken away from you. The way back in needs neither: point SEED_ADMIN_EMAIL at an address "
+                + "that has NO account yet, set SEED_ADMIN_PASSWORD to a password of your own, and restart. "
+                + "Seeding never re-passwords an existing account, so you get a SECOND system administrator "
+                + "while the account above is left exactly as it is; sign in as that new address and "
+                + "regenerate the old account's setup link from Admin console → Users, which needs no mail "
+                + "server either. IT HAS TO BE AN ADDRESS WITH NO ACCOUNT, and that is not a tidiness rule: "
+                + "seeding does not only create — an address that already has an account is PROMOTED to "
+                + "system administrator instead. Nothing is created, no password is set, you are still "
+                + "locked out, and whoever owns that address now administers every workspace on this "
+                + "instance. Then clear the seeding pair again, because the password you just typed is "
+                + "now sitting in your .env in plaintext, and decide what the second administrator is for — "
+                + "keep it, demote it or disable it. Step by step: docs/self-hosting.md, \"If you are "
+                + "the only administrator and cannot sign in\". "
                 + "Only then set a password of your own here — or remove seed.admin.email and "
                 + "seed.admin.password (SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD in your .env) entirely, "
                 + "which leaves the repaired account exactly as it is.");
@@ -421,7 +436,21 @@ public class DataSeeder implements ApplicationRunner {
      * choice is real and unusual here — this can fire on an install whose operator did
      * nothing wrong today, and it fires at the one moment they cannot use the admin console
      * to fix it — so the message has to carry them all the way to repaired without the
-     * application running, and it does: one SQL statement, then boot, then a normal reset.
+     * application running, and it does: one SQL statement, then boot, then a reset.
+     *
+     * <p><strong>And "a reset" is three routes, every one of which a sole administrator with
+     * no mail server lacks</strong> (HD-342): Forgot password needs SMTP, "another system
+     * administrator" needs a second one, and the console that would delete the account sits
+     * behind the sign-in this refusal's own {@code password_hash = NULL} has just taken away.
+     * So both refusals in this class now also prescribe the route that needs neither —
+     * seed a second administrator at an address with no account and restart — and point at
+     * {@code docs/self-hosting.md}, "If you are the only administrator and cannot sign in",
+     * which is where the measured walk-through lives. The rule being satisfied is §8.2 of
+     * {@code docs/design/published-credentials-proposal.md}: a refusal may only prescribe an
+     * action its reader can perform. Held by
+     * {@code StartupRefusalNamesTheVariableTest#everyRefusalThatTakesACredentialAwayNamesARouteBackInItsReaderCanWalk},
+     * whose population is derived twice over rather than listed, so a refusal written
+     * tomorrow is a member without an edit there.
      *
      * <p><strong>Cost, and the bound it forced.</strong> Measured rather than estimated, and
      * at the strength {@code SecurityConfig} actually configures: bcrypt at strength 12 costs
@@ -505,13 +534,28 @@ public class DataSeeder implements ApplicationRunner {
                 + "owns: UPDATE users SET password_hash = NULL WHERE email IN (…the address(es) above…); "
                 + "then start the application, and use 'Forgot password' on that address to set a new one "
                 + "(or, from another system administrator, Admin console → Users → reset it; or delete the "
-                + "account there if it was never meant to exist). AND TREAT THIS AS A COMPROMISE RATHER THAN "
+                + "account there if it was never meant to exist). IF YOU ARE THE ONLY ADMINISTRATOR AND HAVE "
+                + "NO MAIL SERVER, all three of those are empty and the statement above has just locked you "
+                + "out of your own instance; the way back in needs neither: point SEED_ADMIN_EMAIL at an "
+                + "address that has NO account yet, set SEED_ADMIN_PASSWORD to a password of your own, and "
+                + "restart. Seeding never re-passwords an existing account, so you get a SECOND system "
+                + "administrator while the account(s) above are left exactly as they are; sign in as that new "
+                + "address and regenerate the old account's setup link from Admin console → Users, which "
+                + "needs no mail server either. IT HAS TO BE AN ADDRESS WITH NO ACCOUNT, and that is not a "
+                + "tidiness rule: seeding does not only create — an address that already has an account is "
+                + "PROMOTED to system administrator instead. Nothing is created, no password is set, you are "
+                + "still locked out, and whoever owns that address now administers every workspace on this "
+                + "instance. Then clear the seeding pair again, because the password you just typed is now "
+                + "sitting in your .env in plaintext, and decide what the second administrator is for — keep "
+                + "it, demote it or disable it. "
+                + "AND TREAT THIS AS A COMPROMISE RATHER THAN "
                 + "A MISCONFIGURATION: the account has carried the published password for as long as it has "
                 + "existed, and every version before the one printing this served requests with it active — "
                 + "so the question is not whether the instance was ever reachable with that account, it is "
                 + "who could reach it. DELETE FROM refresh_tokens, DELETE FROM password_resets WHERE "
                 + "used_at IS NULL, and check the users list for accounts you did not create. Step by step: "
-                + "docs/self-hosting.md, \"If your instance has the published admin account\".");
+                + "docs/self-hosting.md, \"If your instance has the published admin account\" — and, if you "
+                + "are the only administrator, \"If you are the only administrator and cannot sign in\".");
     }
 
     /**
@@ -660,6 +704,26 @@ public class DataSeeder implements ApplicationRunner {
                 userRepository.save(existing);
                 log.info("Existing seed account promoted to system ADMIN (from seed.admin.email, "
                          + "SEED_ADMIN_EMAIL)");
+            } else {
+                // The one terminal path of this method that used to end in silence, and the most
+                // likely wrong turn on the recovery route the two boot refusals now prescribe
+                // (HD-342): an operator who is locked out leaves SEED_ADMIN_EMAIL pointing at the
+                // account they cannot sign into - which on an unedited template it already does,
+                // because that pair being set is what printed the refusal - sets a new
+                // SEED_ADMIN_PASSWORD, restarts, and gets a clean boot that did nothing. Without
+                // this line they cannot tell "it worked and I am wrong about something else" from
+                // "it did nothing", and the prescribed route reads as broken. Addressless, like
+                // every other line this class logs.
+                log.info("Admin seeding did nothing: the account seed.admin.email (SEED_ADMIN_EMAIL) "
+                         + "names already exists and is already a system administrator. No account was "
+                         + "created, and NO PASSWORD WAS SET - seeding never re-passwords an existing "
+                         + "account, so seed.admin.password (SEED_ADMIN_PASSWORD) was not applied and "
+                         + "whatever that account's password was, it still is. If you are here to "
+                         + "recover an administrator you cannot sign in as, this is the misstep: point "
+                         + "SEED_ADMIN_EMAIL at an address that has NO account at all, which creates a "
+                         + "second administrator you can sign in as and then use to regenerate the "
+                         + "locked-out account's setup link. See docs/self-hosting.md, \"If you are the "
+                         + "only administrator and cannot sign in\"");
             }
             return;
         }

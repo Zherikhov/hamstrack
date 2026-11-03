@@ -127,7 +127,12 @@ through the admin API** — that is, by exactly what a captured account gives th
   must say so plainly, or the release reads as broken.
 − The refusal fires at the moment when the admin console is unavailable precisely because of it.
   This is accepted knowingly and is offset by the means of repair being the database, not the
-  console.
+  console. **That offset covers booting again, not signing in** (HD-342): the SQL statement clears
+  a password, and the three ways to set a new one the messages first offered — Forgot password,
+  another system administrator, delete the account in the console — are all empty for a
+  self-hoster with one administrator and no mail server. Both refusals therefore also prescribe
+  seeding a second administrator, which needs neither, and point at `docs/self-hosting.md`, "If
+  you are the only administrator and cannot sign in".
 − Every checked account costs one bcrypt verification on **every** start — measured at **~370 ms**
   at the cost factor `SecurityConfig` actually sets (12), not the ~100 ms of factor 10, as was
   written here at first. The loop runs once per pair (administrator × published password), so the

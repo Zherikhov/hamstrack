@@ -105,6 +105,35 @@ class SeedAdminPasswordValidationTest {
 
                         Message was: %s""", message)
                 .contains("STORED password");
+        assertThat(message)
+                .withFailMessage("""
+
+                        The statement above takes the password of the only account that could reach \
+                        the console, and the three resets this message used to offer are all empty \
+                        for a sole administrator with no mail server (HD-342). Name the route that \
+                        needs neither - seed a second administrator at an address with no account, \
+                        restart - and point at the guide section that walks it through.
+
+                        Message was: %s""", message)
+                .contains("point SEED_ADMIN_EMAIL at an address that has NO account yet")
+                .contains("If you are the only administrator and cannot sign in");
+        assertThat(message)
+                .withFailMessage("""
+
+                        ... and "an address with no account" is load-bearing, so the message says \
+                        what happens when it is not one. Seeding does not only create: an address \
+                        that already has an account is PROMOTED to system administrator instead - \
+                        nothing is created, no password is set, the reader is still locked out, and \
+                        that account now administers every workspace on the instance. The behaviour \
+                        is measured by \
+                        SeedAdminSquatterRefusalTest#anExactlyMatchingRowIsPromotedEvenFromAMixedCaseConfiguration; \
+                        this line only holds that the reader is told. Do not write "only ever \
+                        creates" here again - it was true of two of the three branches of \
+                        DataSeeder.run.
+
+                        Message was: %s""", message)
+                .contains("PROMOTED to system administrator")
+                .doesNotContain("only ever creates");
     }
 
     /**

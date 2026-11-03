@@ -651,6 +651,15 @@ class ForgeableLogRecordTest {
             + "set, so no ad",
             "DataSeeder#run | Admin seeding skipped — seed.admin.email (SEED_ADMIN_EMAIL) is set "
             + "but seed.admi",
+            // HD-342's witness on the already-ADMIN branch, and the third of this method's
+            // operator-facing family. PROSE for a reason stronger than "nothing reads it": the
+            // template carries no placeholder at all, so there is no foreign value for the
+            // machine-readable tier to demand as a member — the whole sentence is a constant. Its
+            // reader is a human at a console partway through the lockout recovery the two boot
+            // refusals prescribe, and it became a candidate here only because that English
+            // sentence happens to put a colon before its first word boundary.
+            "DataSeeder#run | Admin seeding did nothing: the account seed.admin.email "
+            + "(SEED_ADMIN_EMAIL) names",
             "SseRegistry#disconnectUser | SSE: closed stream(s) for user removed from workspace",
             "AfterCommit#runQuietly | After-commit effect failed and will not be retried: . The "
             + "database change it acc");
